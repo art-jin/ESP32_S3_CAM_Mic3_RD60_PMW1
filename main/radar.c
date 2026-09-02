@@ -42,6 +42,22 @@ static const char *TAG = "radar";
 static const uint8_t VER_REQ[5]  = {0x58, 0xFE, 0x00, 0x56, 0x01};
 static const uint8_t SENS_ON[6]  = {0x58, 0xD1, 0x01, 0x01, 0x2B, 0x01};
 static const uint8_t DET_Q[5]    = {0x58, 0x30, 0x00, 0x88, 0x00};
+/* 3.2.16 breath min distance = 80 (cm) — gates the static ~0.6m desk echo
+ * that the breath detector keeps reporting as a phantom presence target.
+ * 3.2.10 motion min distance = 50 (cm) trims extreme near-field noise.
+ * NB: the micro-motion min-distance command (0x37) is marked ineffective
+ * in this firmware version, which is why we gate on breath instead. */
+static const uint8_t BR_MIN[7]   = {0x58, 0x3A, 0x02, 0x50, 0x00, 0xE4, 0x00};
+static const uint8_t MO_MIN[7]   = {0x58, 0x34, 0x02, 0x32, 0x00, 0xC0, 0x00};
+/* 3.2.7 algorithm boundaries (factory, read-only) / 3.2.8 user config. */
+static const uint8_t Q_BOUND[5]  = {0x58, 0x32, 0x00, 0x8A, 0x00};
+static const uint8_t Q_CFG[5]    = {0x58, 0x33, 0x00, 0x8B, 0x00};
+/* 3.1.5 save settings + 3.1.9 system reset. Distance config only takes
+ * effect after save + reload on this firmware (verified empirically:
+ * 0x34 motion-min reads back live, 0x3A breath-min reads back 0 until
+ * save+reset). Saving once per boot is negligible flash wear. */
+static const uint8_t SAVE[6]     = {0x58, 0x08, 0x01, 0x01, 0x62, 0x00};
+static const uint8_t SYSRST[6]   = {0x58, 0x13, 0x01, 0x01, 0x6D, 0x00};
 
 static SemaphoreHandle_t s_lock;
 static radar_target_t s_target;         /* guarded by s_lock */
@@ -77,6 +93,31 @@ static radar_tgt_state_t decode_state(uint8_t det)
     return RADAR_TGT_NONE;
 }
 
+/* Raw angles scatter ±20°+ while the target moves/speaks (torso sway +
+ * multipath); confidence-qualified still frames are stable. Median of the
+ * last RAD_ANG_HIST qualified samples gives a usable azimuth for fusion. */
+#define RAD_ANG_HIST 5
+static int16_t s_ang_hist[RAD_ANG_HIST];
+static uint8_t s_ang_hist_n;
+
+static int16_t median_hist(void)
+{
+    int16_t tmp[RAD_ANG_HIST];
+    memcpy(tmp, s_ang_hist, s_ang_hist_n * sizeof(int16_t));
+    for (uint8_t i = 1; i < s_ang_hist_n; i++) {
+        int16_t k = tmp[i];
+        int8_t j = i - 1;
+        while (j >= 0 && tmp[j] > k) { tmp[j + 1] = tmp[j]; j--; }
+        tmp[j + 1] = k;
+    }
+    return tmp[s_ang_hist_n / 2];
+}
+
+static void hist_reset(void)
+{
+    s_ang_hist_n = 0;
+}
+
 static void publish(uint8_t det_result, uint16_t range_mm, int16_t angle_deg,
                     uint8_t rb_conf, uint8_t angle_conf, uint32_t frame_idx)
 {
@@ -91,6 +132,20 @@ static void publish(uint8_t det_result, uint16_t range_mm, int16_t angle_deg,
     s_target.state = decode_state(det_result);
     s_target.range_mm = range_mm;
     s_target.angle_deg = angle_deg;
+    if (det_result && rb_conf >= 12 && angle_conf >= 8) {
+        if (s_ang_hist_n < RAD_ANG_HIST) {
+            s_ang_hist[s_ang_hist_n++] = angle_deg;
+        } else {
+            memmove(s_ang_hist, s_ang_hist + 1, (RAD_ANG_HIST - 1) * sizeof(int16_t));
+            s_ang_hist[RAD_ANG_HIST - 1] = angle_deg;
+        }
+    }
+    s_target.filt_n = s_ang_hist_n;
+    s_target.angle_filt_deg = s_ang_hist_n ? median_hist() : angle_deg;
+    float az = RADAR_AZ_OFFSET_DEG + RADAR_AZ_SCALE * (float)s_target.angle_filt_deg;
+    if (az < 0) az += 360;
+    if (az >= 360) az -= 360;
+    s_target.azimuth_deg = az;
     s_target.rb_conf = rb_conf;
     s_target.angle_conf = angle_conf;
     s_target.frame_idx = frame_idx;
@@ -98,10 +153,12 @@ static void publish(uint8_t det_result, uint16_t range_mm, int16_t angle_deg,
     xSemaphoreGive(s_lock);
 
     if (was_valid != s_target.valid || was_state != s_target.state) {
-        ESP_LOGI(TAG, "%s: %s range=%umm angle=%+d° conf=%u/%u",
+        ESP_LOGI(TAG, "%s: %s range=%umm angle=%+d° filt=%+d° az=%.0f° conf=%u/%u",
                  s_target.valid ? "target" : "cleared",
                  state_name(s_target.state),
                  s_target.valid ? range_mm : 0, s_target.valid ? angle_deg : 0,
+                 s_target.valid ? s_target.angle_filt_deg : 0,
+                 s_target.valid ? s_target.azimuth_deg : 0.0f,
                  rb_conf, angle_conf);
     }
 }
@@ -125,6 +182,17 @@ static void handle_reply(const uint8_t *cmd_pos, uint8_t plen)
         s_ver_ok = true;
         ESP_LOGI(TAG, "online: SDK v%d.%d.%d HW v%d.%d",
                  cmd_pos[2], cmd_pos[3], cmd_pos[4], cmd_pos[7], cmd_pos[8]);
+    } else if (cmd == 0x32 && plen >= 14) {
+        const uint8_t *f = cmd_pos + 2;  /* u16s, cm */
+        ESP_LOGI(TAG, "bounds(cm): mot %u-%u micro %u-%u bhr %u-%u",
+                 rd_u16(f), rd_u16(f + 2), rd_u16(f + 4),
+                 rd_u16(f + 6), rd_u16(f + 8), rd_u16(f + 10));
+    } else if (cmd == 0x33 && plen >= 18) {
+        const uint8_t *f = cmd_pos + 2;  /* 6 u16 cm + 3 u16 levels */
+        ESP_LOGI(TAG, "cfg(cm): mot %u-%u micro %u-%u bhr %u-%u lvl %u/%u/%u",
+                 rd_u16(f), rd_u16(f + 2), rd_u16(f + 4), rd_u16(f + 6),
+                 rd_u16(f + 8), rd_u16(f + 10),
+                 rd_u16(f + 12), rd_u16(f + 14), rd_u16(f + 16));
     }
 }
 
@@ -185,6 +253,19 @@ static void radar_task(void *arg)
         ESP_LOGW(TAG, "no version reply — continuing, will keep polling");
     uart_write_bytes(RAD_UART_NUM, SENS_ON, sizeof(SENS_ON));
     vTaskDelay(pdMS_TO_TICKS(200));
+    uart_write_bytes(RAD_UART_NUM, BR_MIN, sizeof(BR_MIN));
+    vTaskDelay(pdMS_TO_TICKS(200));
+    uart_write_bytes(RAD_UART_NUM, MO_MIN, sizeof(MO_MIN));
+    vTaskDelay(pdMS_TO_TICKS(200));
+    uart_write_bytes(RAD_UART_NUM, SAVE, sizeof(SAVE));
+    vTaskDelay(pdMS_TO_TICKS(1200));
+    uart_write_bytes(RAD_UART_NUM, SYSRST, sizeof(SYSRST));
+    ESP_LOGI(TAG, "radar reset to apply distance config (mot>=50cm bhr>=80cm)");
+    vTaskDelay(pdMS_TO_TICKS(4000));
+    uart_write_bytes(RAD_UART_NUM, Q_BOUND, sizeof(Q_BOUND));
+    vTaskDelay(pdMS_TO_TICKS(200));
+    uart_write_bytes(RAD_UART_NUM, Q_CFG, sizeof(Q_CFG));
+    vTaskDelay(pdMS_TO_TICKS(200));
     service_link();
     s_online = true;
 
@@ -214,6 +295,9 @@ static void radar_task(void *arg)
                 s_target.state = RADAR_TGT_NONE;
                 s_target.range_mm = 0;
                 s_target.angle_deg = 0;
+                s_target.angle_filt_deg = 0;
+                s_target.filt_n = 0;
+                hist_reset();
                 s_target.rb_conf = 0;
                 s_target.angle_conf = 0;
                 xSemaphoreGive(s_lock);
@@ -229,9 +313,11 @@ static void radar_task(void *arg)
             radar_target_t t;
             radar_get_target(&t);
             ESP_LOGI(TAG, "[5s] online=%d tgt=%d(%s) range=%umm angle=%+d° "
-                     "conf=%u/%u rx=%uB r30=%u miss=%u bad_ck=%u stray=%u",
+                     "filt=%+d° az=%.0f° conf=%u/%u rx=%uB r30=%u miss=%u bad_ck=%u stray=%u",
                      s_online, t.valid, state_name(t.state),
                      t.valid ? t.range_mm : 0, t.valid ? t.angle_deg : 0,
+                     t.valid ? t.angle_filt_deg : 0,
+                     t.valid ? t.azimuth_deg : 0.0f,
                      t.rb_conf, t.angle_conf,
                      c_rx, c_30, c_miss, c_bad_ck, c_stray);
             c_rx = c_30 = 0;
