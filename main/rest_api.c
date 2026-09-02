@@ -450,6 +450,121 @@ static esp_err_t handler_mode(httpd_req_t *req)
     return send_json_ok(req, resp);
 }
 
+/* GET /api/radar?device_id=XXXX — radar config readback (US-010):
+ * factory bounds + user config + sensing state, queried on demand. */
+static esp_err_t handler_radar_get(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+
+    radar_cfg_t c;
+    if (!radar_req_get_cfg(&c, 3000)) {
+        return send_error(req, 503, "radar_busy",
+                          "radar busy/offline, try again");
+    }
+    char body[480];
+    snprintf(body, sizeof(body),
+        "{\"ok\":true,\"online\":%s,\"sensing\":%s,"
+        "\"bounds\":{\"mot\":[%u,%u],\"micro\":[%u,%u],\"bhr\":[%u,%u]},"
+        "\"cfg\":{\"mot\":[%u,%u],\"mot_lvl\":%u,"
+        "\"micro\":[%u,%u],\"micro_lvl\":%u,"
+        "\"bhr\":[%u,%u],\"bhr_lvl\":%u}}",
+        c.online ? "true" : "false",
+        c.sensing ? "true" : "false",
+        c.b_mot_min, c.b_mot_max, c.b_micro_min, c.b_micro_max,
+        c.b_bhr_min, c.b_bhr_max,
+        c.mot_min, c.mot_max, c.mot_lvl,
+        c.micro_min, c.micro_max, c.micro_lvl,
+        c.bhr_min, c.bhr_max, c.bhr_lvl);
+    return send_json_ok(req, body);
+}
+
+/* POST /api/radar?device_id=XXXX — apply config fields (all optional,
+ * cm units, levels 0-10) and optionally save to the radar's flash.
+ * Body: {"sensing":1,"mot_min":50,"mot_max":1000,"mot_lvl":5,
+ *        "bhr_min":80,"bhr_max":255,"bhr_lvl":3,"save":1} */
+static esp_err_t handler_radar_post(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+
+    char body[MAX_BODY_LEN];
+    if (!read_body(req, body, sizeof(body))) return ESP_OK;
+
+    radar_set_req_t r = {0};
+    int tmp;
+    if (json_get_int(body, "sensing", &tmp)) {
+        r.mask |= RAD_SET_SENSING;
+        r.sensing = tmp != 0;
+    }
+    if (json_get_int(body, "mot_min", &tmp)) {
+        if (tmp < 0 || tmp > 1400) return send_error(req, 400, "bad_request", "mot_min 0-1400 cm");
+        r.mask |= RAD_SET_MOT_MIN; r.mot_min = (uint16_t)tmp;
+    }
+    if (json_get_int(body, "mot_max", &tmp)) {
+        if (tmp < 0 || tmp > 1400) return send_error(req, 400, "bad_request", "mot_max 0-1400 cm");
+        r.mask |= RAD_SET_MOT_MAX; r.mot_max = (uint16_t)tmp;
+    }
+    if (json_get_int(body, "bhr_min", &tmp)) {
+        if (tmp < 0 || tmp > 650) return send_error(req, 400, "bad_request", "bhr_min 0-650 cm");
+        r.mask |= RAD_SET_BHR_MIN; r.bhr_min = (uint16_t)tmp;
+    }
+    if (json_get_int(body, "bhr_max", &tmp)) {
+        if (tmp < 0 || tmp > 650) return send_error(req, 400, "bad_request", "bhr_max 0-650 cm");
+        r.mask |= RAD_SET_BHR_MAX; r.bhr_max = (uint16_t)tmp;
+    }
+    if (json_get_int(body, "mot_lvl", &tmp)) {
+        if (tmp < 0 || tmp > 10) return send_error(req, 400, "bad_request", "mot_lvl 0-10");
+        r.mask |= RAD_SET_MOT_LVL; r.mot_lvl = (uint16_t)tmp;
+    }
+    if (json_get_int(body, "bhr_lvl", &tmp)) {
+        if (tmp < 0 || tmp > 10) return send_error(req, 400, "bad_request", "bhr_lvl 0-10");
+        r.mask |= RAD_SET_BHR_LVL; r.bhr_lvl = (uint16_t)tmp;
+    }
+    if (json_get_int(body, "save", &tmp) && tmp) r.mask |= RAD_SET_SAVE;
+
+    if (!r.mask) {
+        return send_error(req, 400, "bad_request",
+                          "no valid fields (sensing/mot_min/mot_max/mot_lvl/bhr_min/bhr_max/bhr_lvl/save)");
+    }
+
+    radar_cfg_t c;
+    if (!radar_req_set_cfg(&r, &c, 8000)) {
+        return send_error(req, 503, "radar_busy", "radar busy/offline, try again");
+    }
+
+    /* per-field verification against readback */
+    bool v_ok = true;
+    if ((r.mask & RAD_SET_MOT_MIN) && c.mot_min != r.mot_min) v_ok = false;
+    if ((r.mask & RAD_SET_MOT_MAX) && c.mot_max != r.mot_max) v_ok = false;
+    if ((r.mask & RAD_SET_BHR_MIN) && c.bhr_min != r.bhr_min) v_ok = false;
+    if ((r.mask & RAD_SET_BHR_MAX) && c.bhr_max != r.bhr_max) v_ok = false;
+    if ((r.mask & RAD_SET_SENSING) && c.sensing != r.sensing) v_ok = false;
+
+    char out[480];
+    snprintf(out, sizeof(out),
+        "{\"ok\":true,\"verified\":%s,"
+        "\"cfg\":{\"mot\":[%u,%u],\"mot_lvl\":%u,\"bhr\":[%u,%u],\"bhr_lvl\":%u,"
+        "\"sensing\":%s}}",
+        v_ok ? "true" : "false (readback differs — some settings are "
+                       "ineffective in this firmware)",
+        c.mot_min, c.mot_max, c.mot_lvl, c.bhr_min, c.bhr_max, c.bhr_lvl,
+        c.sensing ? "true" : "false");
+    return send_json_ok(req, out);
+}
+
+/* POST /api/radar/reset?device_id=XXXX — radar system reset. Also the
+ * operator's "clear phantom target" button. The radar re-inits for ~5 s;
+ * polling resumes automatically. */
+static esp_err_t handler_radar_reset(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (!radar_req_reset(1000)) {
+        return send_error(req, 503, "radar_busy", "radar busy, try again");
+    }
+    return send_json_ok(req,
+        "{\"ok\":true,\"restarting\":true,\"eta_s\":5,"
+         "\"note\":\"re-applies sensing-on + distance gates\"}");
+}
+
 /* POST /api/point?device_id=XXXX
  * Body: {"dir":"7oc"} or {"angle":30}
  * Only works in COMMAND mode. Rate-limited to 1 per 500ms.
@@ -611,7 +726,7 @@ esp_err_t rest_api_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 6144;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 16;   /* 12 registered; over-limit handlers fail silently */
     config.task_priority = configMAX_PRIORITIES - 5;
 
     esp_err_t err = httpd_start(&s_server, &config);
@@ -638,6 +753,15 @@ esp_err_t rest_api_start(void)
     static const httpd_uri_t uri_mode = {
         .uri = "/api/mode", .method = HTTP_POST, .handler = handler_mode
     };
+    static const httpd_uri_t uri_radar_get = {
+        .uri = "/api/radar", .method = HTTP_GET, .handler = handler_radar_get
+    };
+    static const httpd_uri_t uri_radar_post = {
+        .uri = "/api/radar", .method = HTTP_POST, .handler = handler_radar_post
+    };
+    static const httpd_uri_t uri_radar_reset = {
+        .uri = "/api/radar/reset", .method = HTTP_POST, .handler = handler_radar_reset
+    };
     static const httpd_uri_t uri_point = {
         .uri = "/api/point", .method = HTTP_POST, .handler = handler_point
     };
@@ -654,10 +778,13 @@ esp_err_t rest_api_start(void)
     httpd_register_uri_handler(s_server, &uri_logs);
     httpd_register_uri_handler(s_server, &uri_events);
     httpd_register_uri_handler(s_server, &uri_mode);
+    httpd_register_uri_handler(s_server, &uri_radar_get);
+    httpd_register_uri_handler(s_server, &uri_radar_post);
+    httpd_register_uri_handler(s_server, &uri_radar_reset);
     httpd_register_uri_handler(s_server, &uri_point);
     httpd_register_uri_handler(s_server, &uri_shake);
     httpd_register_uri_handler(s_server, &uri_options);
 
-    ESP_LOGI(TAG, "REST API started: /api/ping /api/status /api/logs /api/events /api/mode /api/point /api/shake");
+    ESP_LOGI(TAG, "REST API started: /api/ping /api/status /api/logs /api/events /api/mode /api/radar /api/radar/reset /api/point /api/shake");
     return ESP_OK;
 }

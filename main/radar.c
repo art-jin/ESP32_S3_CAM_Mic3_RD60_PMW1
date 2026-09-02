@@ -42,6 +42,7 @@
 static const char *TAG = "radar";
 
 static const uint8_t VER_REQ[5]  = {0x58, 0xFE, 0x00, 0x56, 0x01};
+static const uint8_t SENS_Q[5]   = {0x58, 0xD0, 0x00, 0x28, 0x01};  /* 3.2.2 sensing status */
 static const uint8_t SENS_ON[6]  = {0x58, 0xD1, 0x01, 0x01, 0x2B, 0x01};
 static const uint8_t DET_Q[5]    = {0x58, 0x30, 0x00, 0x88, 0x00};
 /* 3.2.16 breath min distance = 80 (cm) — gates the static ~0.6m desk echo
@@ -83,6 +84,191 @@ static volatile bool s_sound_activity;
 void radar_notify_sound(void)
 {
     s_sound_activity = true;
+}
+
+/* ---- Configuration request mailbox (US-010) ----
+ * REST handlers post a request; the radar task (sole UART owner)
+ * executes it inside its poll loop and signals completion. */
+typedef enum {
+    RAD_REQ_NONE = 0,
+    RAD_REQ_GET_CFG,
+    RAD_REQ_SET_CFG,
+    RAD_REQ_RESET,
+} rad_req_type_t;
+
+typedef struct {
+    rad_req_type_t type;
+    radar_set_req_t set;
+    radar_cfg_t cfg;        /* filled by the radar task */
+    bool ok;
+} rad_req_t;
+
+static rad_req_t s_req;                     /* guarded by s_req_lock */
+static SemaphoreHandle_t s_req_lock;
+static SemaphoreHandle_t s_req_done;        /* binary, given on completion */
+static volatile bool s_req_pending;
+
+static bool service_link(void);             /* fwd decls: defined below */
+static void hist_reset(void);
+
+/* Reply capture targets: when set, handle_reply copies matching payloads */
+static volatile uint8_t  s_capture_cmd;     /* 0x32 / 0x33 / 0xD0 */
+static radar_cfg_t      *s_capture_dst;
+static volatile bool     s_got_bounds, s_got_cfg, s_got_sensing;
+
+static bool req_post(rad_req_type_t type, const radar_set_req_t *set,
+                     radar_cfg_t *out, uint32_t timeout_ms)
+{
+    if (!s_req_lock) return false;
+    if (xSemaphoreTake(s_req_lock, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+    if (s_req_pending) { xSemaphoreGive(s_req_lock); return false; }  /* busy */
+    s_req.type = type;
+    s_req.ok = false;
+    if (set) s_req.set = *set;
+    memset(&s_req.cfg, 0, sizeof(s_req.cfg));
+    s_req_pending = true;
+    xSemaphoreGive(s_req_lock);
+
+    xSemaphoreTake(s_req_done, 0);          /* clear stale */
+    /* Wake the radar task promptly: it polls every <=20 ms anyway. */
+    if (xSemaphoreTake(s_req_done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        /* timeout — reclaim the slot so future requests can proceed */
+        xSemaphoreTake(s_req_lock, portMAX_DELAY);
+        s_req_pending = false;
+        xSemaphoreGive(s_req_lock);
+        return false;
+    }
+    xSemaphoreTake(s_req_lock, portMAX_DELAY);
+    bool ok = s_req.ok;
+    if (out) *out = s_req.cfg;
+    s_req_pending = false;
+    xSemaphoreGive(s_req_lock);
+    return ok;
+}
+
+bool radar_req_get_cfg(radar_cfg_t *out, uint32_t timeout_ms)
+{
+    return req_post(RAD_REQ_GET_CFG, NULL, out, timeout_ms);
+}
+
+bool radar_req_set_cfg(const radar_set_req_t *req, radar_cfg_t *out,
+                       uint32_t timeout_ms)
+{
+    return req_post(RAD_REQ_SET_CFG, req, out, timeout_ms);
+}
+
+bool radar_req_reset(uint32_t timeout_ms)
+{
+    return req_post(RAD_REQ_RESET, NULL, NULL, timeout_ms);
+}
+
+/* Build a host command frame: 58 CMD PLEN params... CK16(LE). */
+static size_t mk_cmd(uint8_t *buf, uint8_t cmd, const uint8_t *p, uint8_t plen)
+{
+    buf[0] = 0x58; buf[1] = cmd; buf[2] = plen;
+    if (plen) memcpy(buf + 3, p, plen);
+    uint16_t sum = 0;
+    for (size_t i = 0; i < 3u + plen; i++) sum += buf[i];
+    buf[3 + plen] = (uint8_t)(sum & 0xFF);
+    buf[4 + plen] = (uint8_t)(sum >> 8);
+    return 5u + plen;
+}
+
+static void send_u16_cmd(uint8_t cmd, uint16_t val)
+{
+    uint8_t b[8], p[2] = {(uint8_t)(val & 0xFF), (uint8_t)(val >> 8)};
+    uart_write_bytes(RAD_UART_NUM, b, mk_cmd(b, cmd, p, 2));
+}
+
+static void send_u8_cmd(uint8_t cmd, uint8_t val)
+{
+    uint8_t b[8], p[1] = {val};
+    uart_write_bytes(RAD_UART_NUM, b, mk_cmd(b, cmd, p, 1));
+}
+
+/* Pump service_link until cond becomes true or timeout. Runs in the
+ * radar task only. */
+static bool wait_for(volatile bool *cond, uint32_t timeout_ms)
+{
+    int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    while (esp_timer_get_time() < deadline) {
+        service_link();
+        if (*cond) return true;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    return false;
+}
+
+static bool query_cfg_into(radar_cfg_t *c)
+{
+    s_capture_dst = c;
+    s_got_bounds = s_got_cfg = s_got_sensing = false;
+    s_capture_cmd = 0x32;
+    uart_write_bytes(RAD_UART_NUM, Q_BOUND, sizeof(Q_BOUND));
+    bool b1 = wait_for(&s_got_bounds, 400);
+    s_capture_cmd = 0x33;
+    uart_write_bytes(RAD_UART_NUM, Q_CFG, sizeof(Q_CFG));
+    bool b2 = wait_for(&s_got_cfg, 400);
+    s_capture_cmd = 0xD0;
+    uart_write_bytes(RAD_UART_NUM, SENS_Q, sizeof(SENS_Q));
+    bool b3 = wait_for(&s_got_sensing, 400);
+    s_capture_cmd = 0;
+    c->online = s_online && (b1 || b2);
+    return b1 && b2 && b3;
+}
+
+static void exec_set_cfg(const radar_set_req_t *r)
+{
+    if (r->mask & RAD_SET_SENSING) send_u8_cmd(0xD1, r->sensing ? 1 : 0);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    if (r->mask & RAD_SET_MOT_MIN) send_u16_cmd(0x34, r->mot_min);
+    if (r->mask & RAD_SET_MOT_MAX) send_u16_cmd(0xD2, r->mot_max);
+    if (r->mask & RAD_SET_MOT_LVL) send_u8_cmd(0x35, (uint8_t)r->mot_lvl);
+    if (r->mask & RAD_SET_BHR_MIN) send_u16_cmd(0x3A, r->bhr_min);
+    if (r->mask & RAD_SET_BHR_MAX) send_u16_cmd(0x39, r->bhr_max);
+    if (r->mask & RAD_SET_BHR_LVL) send_u8_cmd(0x3B, (uint8_t)r->bhr_lvl);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    if (r->mask & RAD_SET_SAVE) {
+        uint8_t b[8];
+        uart_write_bytes(RAD_UART_NUM, b, mk_cmd(b, 0x08, (const uint8_t *)"\x01", 1));
+        vTaskDelay(pdMS_TO_TICKS(1200));   /* doc: wait >=1 s after save */
+    }
+}
+
+static void exec_request(void)
+{
+    switch (s_req.type) {
+    case RAD_REQ_GET_CFG:
+        s_req.ok = query_cfg_into(&s_req.cfg);
+        break;
+    case RAD_REQ_SET_CFG:
+        exec_set_cfg(&s_req.set);
+        s_req.ok = query_cfg_into(&s_req.cfg);
+        break;
+    case RAD_REQ_RESET:
+        /* Ack immediately (queue semantics): the reset sequence itself
+         * runs ~5 s, longer than any sane HTTP timeout. */
+        s_req.ok = true;
+        xSemaphoreGive(s_req_done);
+        /* Reset to the module's stored config, then re-apply our
+         * standard init (sensing on + distance gates). */
+        uart_write_bytes(RAD_UART_NUM, SYSRST, sizeof(SYSRST));
+        vTaskDelay(pdMS_TO_TICKS(4000));
+        uart_write_bytes(RAD_UART_NUM, SENS_ON, sizeof(SENS_ON));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        uart_write_bytes(RAD_UART_NUM, BR_MIN, sizeof(BR_MIN));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        uart_write_bytes(RAD_UART_NUM, MO_MIN, sizeof(MO_MIN));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        hist_reset();
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_target = (radar_target_t){0};
+        xSemaphoreGive(s_lock);
+        return;   /* done semaphore already given */
+    default:
+        break;
+    }
+    xSemaphoreGive(s_req_done);
 }
 
 static const char *state_name(radar_tgt_state_t s)
@@ -207,12 +393,33 @@ static void handle_reply(const uint8_t *cmd_pos, uint8_t plen)
         ESP_LOGI(TAG, "bounds(cm): mot %u-%u micro %u-%u bhr %u-%u",
                  rd_u16(f), rd_u16(f + 2), rd_u16(f + 4),
                  rd_u16(f + 6), rd_u16(f + 8), rd_u16(f + 10));
+        if (s_capture_cmd == 0x32 && s_capture_dst) {
+            radar_cfg_t *c = s_capture_dst;
+            c->b_mot_min = rd_u16(f);      c->b_mot_max = rd_u16(f + 2);
+            c->b_micro_min = rd_u16(f + 4); c->b_micro_max = rd_u16(f + 6);
+            c->b_bhr_min = rd_u16(f + 8);  c->b_bhr_max = rd_u16(f + 10);
+            s_got_bounds = true;
+        }
     } else if (cmd == 0x33 && plen >= 18) {
         const uint8_t *f = cmd_pos + 2;  /* 6 u16 cm + 3 u16 levels */
         ESP_LOGI(TAG, "cfg(cm): mot %u-%u micro %u-%u bhr %u-%u lvl %u/%u/%u",
                  rd_u16(f), rd_u16(f + 2), rd_u16(f + 4), rd_u16(f + 6),
                  rd_u16(f + 8), rd_u16(f + 10),
                  rd_u16(f + 12), rd_u16(f + 14), rd_u16(f + 16));
+        if (s_capture_cmd == 0x33 && s_capture_dst) {
+            radar_cfg_t *c = s_capture_dst;
+            c->mot_min = rd_u16(f);       c->mot_max = rd_u16(f + 2);
+            c->micro_min = rd_u16(f + 4); c->micro_max = rd_u16(f + 6);
+            c->bhr_min = rd_u16(f + 8);   c->bhr_max = rd_u16(f + 10);
+            c->mot_lvl = rd_u16(f + 12);  c->micro_lvl = rd_u16(f + 14);
+            c->bhr_lvl = rd_u16(f + 16);
+            s_got_cfg = true;
+        }
+    } else if (cmd == 0xD0 && plen >= 1) {
+        if (s_capture_cmd == 0xD0 && s_capture_dst) {
+            s_capture_dst->sensing = cmd_pos[2] != 0;
+            s_got_sensing = true;
+        }
     }
 }
 
@@ -290,6 +497,13 @@ static void radar_task(void *arg)
     s_online = true;
 
     while (1) {
+        /* Execute a posted configuration request (UART stays in this
+         * task). Polling pauses for the duration — bounded by the
+         * request type (GET ~1.2 s, SET ~2.5 s, RESET ~5 s). */
+        if (s_req_pending) {
+            exec_request();
+        }
+
         int64_t now = esp_timer_get_time();
         if (now - last_poll >= RAD_POLL_MS * 1000LL) {
             uart_write_bytes(RAD_UART_NUM, DET_Q, sizeof(DET_Q));
@@ -434,6 +648,9 @@ static void radar_task(void *arg)
 void radar_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
+    s_req_lock = xSemaphoreCreateMutex();
+    s_req_done = xSemaphoreCreateBinary();
+    s_req_pending = false;
 
     const uart_config_t cfg = {
         .baud_rate = RAD_BAUD,

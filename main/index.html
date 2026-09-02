@@ -115,7 +115,31 @@ main{flex:1;display:grid;grid-template-columns:1fr 360px;gap:12px;padding:12px;m
       <div class="kv"><span>雷达原始角</span><b id="v_rawang">--</b></div>
       <div class="kv"><span>关联</span><b id="v_assoc">--</b></div>
       <div class="kv"><span>帧序号</span><b id="v_fidx">--</b></div>
-      <p class="small" style="margin-top:8px;color:var(--tx2)">检测配置（距离/灵敏度/重置）在 V2 提供。</p>
+      <div class="row" style="margin-top:12px"><label class="small">检测配置（单位 cm）</label>
+        <button class="btn" id="btn_rcfg_read">读取</button>
+      </div>
+      <div class="row"><label class="small" style="width:52px">运动距离</label>
+        <input type="number" id="rc_mot_min" min="0" max="1400" placeholder="最近"> –
+        <input type="number" id="rc_mot_max" min="0" max="1400" placeholder="最远">
+      </div>
+      <div class="row"><label class="small" style="width:52px">运动灵敏度</label>
+        <input type="number" id="rc_mot_lvl" min="0" max="10" placeholder="0-10">
+        <span class="small">档（越大越不灵敏）</span>
+      </div>
+      <div class="row"><label class="small" style="width:52px">呼吸距离</label>
+        <input type="number" id="rc_bhr_min" min="0" max="650" placeholder="最近"> –
+        <input type="number" id="rc_bhr_max" min="0" max="650" placeholder="最远">
+      </div>
+      <div class="row"><label class="small" style="width:52px">呼吸灵敏度</label>
+        <input type="number" id="rc_bhr_lvl" min="0" max="10" placeholder="0-10">
+      </div>
+      <div class="kv"><span class="small">微动（固件无效项）</span><b class="small" id="rc_micro">--</b></div>
+      <div class="row">
+        <button class="btn" id="btn_rcfg_set">下发并保存</button>
+        <button class="btn warn" id="btn_rreset">重置雷达 ⚠</button>
+        <span class="small" id="rc_note"></span>
+      </div>
+      <p class="small" style="color:var(--tx2)">重置会重新初始化雷达 ~5s（顺带清除桌面幻影目标）；微动距离/灵敏度命令在当前固件版本无效，仅显示读回值。</p>
     </div>
   </div>
 </main>
@@ -228,6 +252,42 @@ $("btn_still").onclick=()=>{api("/api/mode",{still_min:parseInt($("still_min").v
 });
 $("btn_pt").onclick=()=>api("/api/point",{angle:parseFloat($("pt_ang").value||"0")}).then(j=>{if(j)toast("✓ 已转向");});
 $("btn_shake").onclick=()=>{toast("摇动中 ~7s…",7000);api("/api/shake",{});};
+
+/* ---------- 雷达配置（V2） ---------- */
+async function rcfgRead(){
+  $("rc_note").textContent="读取中…";
+  const j=await api("/api/radar");
+  $("rc_note").textContent="";
+  if(!j)return;
+  $("rc_mot_min").value=j.cfg.mot[0];$("rc_mot_max").value=j.cfg.mot[1];
+  $("rc_mot_lvl").value=j.cfg.mot_lvl;
+  $("rc_bhr_min").value=j.cfg.bhr[0];$("rc_bhr_max").value=j.cfg.bhr[1];
+  $("rc_bhr_lvl").value=j.cfg.bhr_lvl;
+  $("rc_micro").textContent=j.cfg.micro[0]+"–"+j.cfg.micro[1]+" cm";
+  toast("已读取（出厂边界 运动"+j.bounds.mot[0]+"-"+j.bounds.mot[1]+
+        " 呼吸"+j.bounds.bhr[0]+"-"+j.bounds.bhr[1]+" cm）");
+}
+$("btn_rcfg_read").onclick=rcfgRead;
+$("btn_rcfg_set").onclick=async()=>{
+  const body={save:1};
+  const mm=parseInt($("rc_mot_min").value),mx=parseInt($("rc_mot_max").value);
+  const bm=parseInt($("rc_bhr_min").value),bx=parseInt($("rc_bhr_max").value);
+  if(!isNaN(mm))body.mot_min=mm; if(!isNaN(mx))body.mot_max=mx;
+  if(!isNaN(bm))body.bhr_min=bm; if(!isNaN(bx))body.bhr_max=bx;
+  const ml=parseInt($("rc_mot_lvl").value),bl=parseInt($("rc_bhr_lvl").value);
+  if(!isNaN(ml))body.mot_lvl=ml; if(!isNaN(bl))body.bhr_lvl=bl;
+  $("rc_note").textContent="下发中…（保存约 3s）";
+  const j=await api("/api/radar",body);
+  $("rc_note").textContent="";
+  if(!j)return;
+  if(j.verified===true)toast("✓ 已下发并保存，读回一致");
+  else toast("⚠ 已下发，但读回不一致："+JSON.stringify(j.cfg));
+};
+$("btn_rreset").onclick=async()=>{
+  if(!confirm("重置雷达？将中断 ~5s（会清除幻影目标）"))return;
+  const j=await api("/api/radar/reset");
+  if(j)toast("雷达重置中 ~5s…",6000);
+};
 $("btn_save_id").onclick=()=>{
   DEV=$("devid").value.trim().toUpperCase();
   if(DEV.length!==6){toast("DeviceID 需 6 位（串口日志查看）");return;}

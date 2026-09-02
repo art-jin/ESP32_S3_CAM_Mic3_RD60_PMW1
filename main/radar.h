@@ -53,3 +53,48 @@ bool radar_get_target(radar_target_t *out);
 /* Notify the radar module that speech/DOA activity was observed (used by
  * the stillness care alarm as a recovery trigger). */
 void radar_notify_sound(void);
+
+/* ---- Configuration requests (PRD US-010, V2) ----
+ * All UART I/O stays inside the radar task: callers post a request and
+ * wait on a semaphore; the poll loop executes it and fills the result. */
+
+typedef struct {
+    /* factory boundaries (cm), from cmd 0x32 */
+    uint16_t b_mot_min, b_mot_max, b_micro_min, b_micro_max, b_bhr_min, b_bhr_max;
+    /* current user config (cm + levels 0-10), from cmd 0x33 */
+    uint16_t mot_min, mot_max, micro_min, micro_max, bhr_min, bhr_max;
+    uint16_t mot_lvl, micro_lvl, bhr_lvl;
+    bool sensing;       /* from 0xD0 */
+    bool online;
+} radar_cfg_t;
+
+/* Bitmask of which SET fields the caller wants applied (radar_set_mask_t) */
+#define RAD_SET_SENSING   (1u << 0)
+#define RAD_SET_MOT_MIN   (1u << 1)
+#define RAD_SET_MOT_MAX   (1u << 2)
+#define RAD_SET_MOT_LVL   (1u << 3)
+#define RAD_SET_BHR_MIN   (1u << 4)
+#define RAD_SET_BHR_MAX   (1u << 5)
+#define RAD_SET_BHR_LVL   (1u << 6)
+#define RAD_SET_SAVE      (1u << 7)
+
+typedef struct {
+    uint32_t mask;      /* RAD_SET_* of fields valid below */
+    bool     sensing;
+    uint16_t mot_min, mot_max, mot_lvl;
+    uint16_t bhr_min, bhr_max, bhr_lvl;
+} radar_set_req_t;
+
+/* POST a config read. Returns false on timeout (radar busy/offline). */
+bool radar_req_get_cfg(radar_cfg_t *out, uint32_t timeout_ms);
+
+/* POST a config write (+optional save). *out receives the readback
+ * config afterwards. Returns false on timeout; per-field verification
+ * is the caller's job (compare request vs out). */
+bool radar_req_set_cfg(const radar_set_req_t *req, radar_cfg_t *out,
+                       uint32_t timeout_ms);
+
+/* POST a radar system reset (clears the phantom target). Async-ish:
+ * returns once the reset command is queued; the radar re-inits for
+ * ~5 s afterwards. */
+bool radar_req_reset(uint32_t timeout_ms);

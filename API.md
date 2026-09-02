@@ -310,6 +310,61 @@ GET /api/events?device_id=XXXXXX&since=42   # 仅 seq > 42 的增量
 
 ---
 
+### GET /api/radar
+
+雷达配置读回（US-010，按需查询，响应 ~1.2s）。
+
+**请求**：
+```
+GET /api/radar?device_id=XXXXXX
+```
+
+**响应**（200）：
+```json
+{
+  "ok": true, "online": true, "sensing": true,
+  "bounds": {"mot":[0,1400], "micro":[0,650], "bhr":[0,650]},
+  "cfg":    {"mot":[50,150], "mot_lvl":5,
+             "micro":[4,0], "micro_lvl":0,
+             "bhr":[0,255], "bhr_lvl":3}
+}
+```
+
+`bounds` = 出厂算法边界（cm，只读）；`cfg` = 当前用户配置（距离 cm / 灵敏度 0-10 档）。注意：读回的 `*_lvl` 字段与固件实际布局存在对齐疑问（实测 mot_lvl 读回 80），以验证为准而非绝对值；微动距离/灵敏度命令在本固件版本无效。
+
+---
+
+### POST /api/radar
+
+下发配置字段（全部可选，扁平字段；cm 单位；`save:1` 同时写入雷达 flash）。响应包含读回校验。
+
+**请求**：
+```json
+{"mot_min":50, "mot_max":800, "mot_lvl":5,
+ "bhr_min":80, "bhr_max":255, "bhr_lvl":3,
+ "sensing":1, "save":1}
+```
+
+**响应**（200）：
+```json
+{"ok":true, "verified":true, "cfg":{"mot":[50,800], ...}}
+```
+
+`verified:false` 表示读回与请求不一致（个别设置在当前固件无效）。范围校验：mot 0-1400cm、bhr 0-650cm、lvl 0-10，非法值 400。下发+保存全程 ~2.5-3.5s。
+
+---
+
+### POST /api/radar/reset
+
+雷达系统复位（也是运维上的"清除幻影目标"按钮）。立即应答，后台执行 ~5s（复位后自动重新应用感应开启 + 距离门限）。
+
+**响应**（200）：
+```json
+{"ok":true, "restarting":true, "eta_s":5}
+```
+
+---
+
 ### GET /api/logs
 
 NVS 事件日志（evlog，32 槽，跨重启留存）。记录舵机命令、模式切换、雷达离线、告警等取证事件，含开机计数与重启原因。响应格式见设备 /api/logs 实测；用于事后诊断而非实时监控（实时用 /api/events）。

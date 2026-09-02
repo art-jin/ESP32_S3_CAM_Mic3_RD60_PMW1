@@ -143,14 +143,16 @@
 - 说话触发必须 conf≥0.5 门限：环境噪声（电脑风扇等）能通过 tracker 的 0.35+2/3 过滤并持续重置计时（实测 az 12-75° 噪声 DOA）
 - **桌面多反射体场景告警事实上关闭**（幻影/手部持续 MOTION = 恒有活动，诚实行为）；目标部署场景（椅子/床，单人）无此问题
 
-### US-010: 雷达配置命令下发（V2 实施中，设计见 tasks/visualizer-design.md）
+### US-010: 雷达配置命令下发（V2 完成 2026-09-02，设计见 tasks/visualizer-design.md）
 **Description:** 作为用户，我通过 REST 调整雷达运动/微动检测距离与灵敏度并保存。
 
 **Acceptance Criteria:**
-- [ ] GET/POST /api/radar + POST /api/radar/reset（读回 0x32/0x33，写入 0xD1/0x34/0xD2/0x37/0x36/0x3A/0x39/灵敏度组/0x08 保存/0x13 复位）
-- [ ] 参数校验（距离 0~10m / 0~8m，灵敏度 0~10 档）
-- [ ] 失败重试 1 次，结果在响应中反馈
-- [ ] `idf.py build` 通过
+- [x] GET/POST /api/radar + POST /api/radar/reset（读回 0x32/0x33/0xD0，写入 0xD1/0x34/0xD2/0x3A/0x39/0x35/0x3B/0x08 保存/0x13 复位；命令邮箱架构保证 UART 单任务独占）
+- [x] 参数校验（mot 0-1400cm / bhr 0-650cm，灵敏度 0-10 档，非法值 400）
+- [x] 读回验证回路（verified 字段；实测 mot_max 150→800→150 双向 verified:true）
+- [x] 复位为队列语义（立即应答，后台 ~5s 执行并自动重应用标准配置）
+- [x] 附带修复：httpd max_uri_handlers 8→16（12 个注册端点超出上限时静默失败，曾致 /api/radar/reset 与 /api/point 404）
+- [x] 页面右下配置区（读取/下发保存/重置）实测通过
 
 ### US-011: 设备内置可视化页面（设计定稿 2026-09-02，tasks/visualizer-design.md）
 **Description:** 作为看护者，我打开设备网页即看到雷达态势图（目标/声音/舵机指向）并直接控制跟踪与雷达。

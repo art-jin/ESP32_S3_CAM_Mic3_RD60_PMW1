@@ -43,9 +43,12 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor     # Ctrl-] 退出
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | **/** | 内置可视化页面（态势图 + 控制，无需鉴权） |
 | GET | /api/ping | 心跳（免鉴权） |
 | GET | /api/status | 完整状态：DOA + 舵机 + 雷达目标 + 关联结果 + 子模式 |
 | GET | /api/events?since=SEQ | 场景事件队列（32 槽，序号增量拉取） |
+| GET/POST | /api/radar | 雷达配置读回 / 下发（距离/灵敏度/保存，US-010） |
+| POST | /api/radar/reset | 雷达复位（清幻影，后台 ~5s） |
 | GET | /api/logs | NVS 事件日志（重启留存，取证用） |
 | POST | /api/mode | 切换 track/command；track 子模式 submode/oor/still_min |
 | POST | /api/point | 指令转向（command 模式） |
