@@ -244,6 +244,19 @@ static esp_err_t handler_status(httpd_req_t *req)
     return send_json_ok(req, body);
 }
 
+/* Embedded visualization page (main/index.html via EMBED_FILES). Served
+ * without auth — the page itself carries no data; every /api endpoint
+ * still requires device_id. */
+extern const uint8_t index_html_start[] asm("_binary_index_html_start");
+extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
+
+static esp_err_t handler_root(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, (const char *)index_html_start,
+                           index_html_end - index_html_start);
+}
+
 /* GET /api/events?device_id=XXXX[&since=SEQ]
  * Returns the newest 32 scene events; pass since=<last seq seen> for
  * incremental polling. Events older than the ring window are skipped. */
@@ -607,6 +620,9 @@ esp_err_t rest_api_start(void)
         return err;
     }
 
+    static const httpd_uri_t uri_root = {
+        .uri = "/", .method = HTTP_GET, .handler = handler_root
+    };
     static const httpd_uri_t uri_ping = {
         .uri = "/api/ping", .method = HTTP_GET, .handler = handler_ping
     };
@@ -632,6 +648,7 @@ esp_err_t rest_api_start(void)
         .uri = "/*", .method = HTTP_OPTIONS, .handler = handler_options
     };
 
+    httpd_register_uri_handler(s_server, &uri_root);
     httpd_register_uri_handler(s_server, &uri_ping);
     httpd_register_uri_handler(s_server, &uri_status);
     httpd_register_uri_handler(s_server, &uri_logs);

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>雷达态势 · ESP32 声源定位融合</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --panel2:#1c2128; --line:#30363d;
+  --tx:#e6edf3; --tx2:#8b949e; --acc:#58a6ff; --ok:#3fb950; --warn:#d29922;
+  --err:#f85149; --motion:#f0883e; --breath:#3fb950; --appr:#58a6ff; --depr:#bc8cff;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;height:100vh;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{font-size:16px;font-weight:600}
+header .dot{width:10px;height:10px;border-radius:50%;background:var(--err);flex:none;transition:background .3s}
+header .dot.on{background:var(--ok)}
+header .sep{flex:1}
+label.small{color:var(--tx2);font-size:12px}
+input[type=text],input[type=number]{background:var(--panel2);border:1px solid var(--line);color:var(--tx);border-radius:6px;padding:5px 8px;font-size:13px}
+input[type=number]{width:70px}
+main{flex:1;display:grid;grid-template-columns:1fr 360px;gap:12px;padding:12px;min-height:0}
+@media(max-width:860px){main{grid-template-columns:1fr;overflow:auto}}
+.left{display:flex;flex-direction:column;gap:8px;min-width:0}
+#ppi{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:100%;aspect-ratio:1/1;max-height:calc(100vh - 160px)}
+#evlog{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 10px;height:110px;overflow-y:auto;font:12px/1.7 ui-monospace,monospace;color:var(--tx2);flex:none}
+#evlog b{color:var(--tx)}
+.right{display:flex;flex-direction:column;gap:12px;min-width:0;overflow-y:auto}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.panel h2{font-size:13px;color:var(--tx2);font-weight:600;margin-bottom:10px;letter-spacing:.05em}
+.row{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
+.seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{background:var(--panel2);color:var(--tx2);border:0;padding:5px 10px;cursor:pointer;font-size:12px}
+.seg button.act{background:var(--acc);color:#fff}
+.rad{display:flex;gap:12px;flex-wrap:wrap}
+.rad label{display:flex;gap:4px;align-items:center;color:var(--tx2);font-size:12px;cursor:pointer}
+.kv{display:flex;justify-content:space-between;padding:3px 0;font-size:13px;border-bottom:1px dashed #21262d}
+.kv span:first-child{color:var(--tx2)}
+.btn{background:var(--panel2);border:1px solid var(--line);color:var(--tx);border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px}
+.btn:hover{border-color:var(--acc)}
+.btn.warn{border-color:var(--warn);color:var(--warn)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.ocs{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.ocs button{padding:5px 0;font-size:12px}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#2d333b;border:1px solid var(--line);color:var(--tx);padding:8px 16px;border-radius:8px;opacity:0;transition:opacity .3s;pointer-events:none;max-width:80vw}
+#toast.show{opacity:1}
+.st{font-size:12px;padding:1px 8px;border-radius:10px}
+.st.motion{background:rgba(240,136,62,.2);color:var(--motion)}
+.st.breath{background:rgba(63,185,80,.2);color:var(--breath)}
+.st.approach{background:rgba(88,166,255,.2);color:var(--appr)}
+.st.depart{background:rgba(188,140,255,.2);color:var(--depr)}
+.st.none{background:rgba(139,148,158,.15);color:var(--tx2)}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="hdot"></div>
+  <h1>雷达态势 · 声源定位融合</h1>
+  <span class="sep"></span>
+  <label class="small">DeviceID</label>
+  <input type="text" id="devid" size="8" maxlength="6" placeholder="6位">
+  <button class="btn" id="btn_save_id">保存</button>
+  <span class="small" id="host"></span>
+</header>
+<main>
+  <div class="left">
+    <div class="row" style="margin:0">
+      <label class="small">量程</label>
+      <div class="seg" id="seg_scale">
+        <button data-v="auto" class="act">自动</button><button data-v="2.5">2.5m</button><button data-v="5">5m</button><button data-v="10">10m</button>
+      </div>
+      <span class="small" id="scale_hint"></span>
+    </div>
+    <canvas id="ppi"></canvas>
+    <div id="evlog"></div>
+  </div>
+  <div class="right">
+    <div class="panel" id="p_mic">
+      <h2>麦克风阵列 / 跟踪</h2>
+      <div class="row"><label class="small">模式</label>
+        <div class="seg" id="seg_mode"><button data-v="track">声源跟踪</button><button data-v="command">指令转向</button></div>
+      </div>
+      <div class="row"><label class="small">子模式</label>
+        <div class="seg" id="seg_sub"><button data-v="audio_only">纯声音</button><button data-v="fusion">融合</button><button data-v="radar_follow">雷达跟随</button></div>
+      </div>
+      <div class="row"><label class="small">超范围</label>
+        <div class="seg" id="seg_oor"><button data-v="hold">保持</button><button data-v="clamp">边界</button><button data-v="home">回中</button><button data-v="scan">扫描</button></div>
+      </div>
+      <div class="row"><label class="small">长静止告警</label>
+        <input type="number" id="still_min" min="0" max="1440" placeholder="分钟">
+        <span class="small">分钟（0=关）</span>
+        <button class="btn" id="btn_still">设置</button>
+      </div>
+      <div class="kv"><span>DOA 方位</span><b id="v_az">--</b></div>
+      <div class="kv"><span>DOA 置信</span><b id="v_conf">--</b></div>
+      <div class="kv"><span>舵机</span><b id="v_servo">--</b></div>
+      <div id="cmdbox" class="hidden">
+        <div class="row" style="margin-top:12px"><label class="small">指向（指令模式）</label></div>
+        <div class="ocs" id="ocbtns"></div>
+        <div class="row">
+          <input type="number" id="pt_ang" placeholder="±90°">
+          <button class="btn" id="btn_pt">转向</button>
+          <button class="btn warn" id="btn_shake">摇动 (~7s)</button>
+        </div>
+      </div>
+    </div>
+    <div class="panel" id="p_radar">
+      <h2>雷达</h2>
+      <div class="kv"><span>链路</span><b id="v_online">--</b></div>
+      <div class="kv"><span>目标状态</span><b id="v_state">--</b></div>
+      <div class="kv"><span>距离 / 方位</span><b id="v_rng">--</b></div>
+      <div class="kv"><span>置信 rb/ang</span><b id="v_rconf">--</b></div>
+      <div class="kv"><span>雷达原始角</span><b id="v_rawang">--</b></div>
+      <div class="kv"><span>关联</span><b id="v_assoc">--</b></div>
+      <div class="kv"><span>帧序号</span><b id="v_fidx">--</b></div>
+      <p class="small" style="margin-top:8px;color:var(--tx2)">检测配置（距离/灵敏度/重置）在 V2 提供。</p>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+"use strict";
+/* ---------- 基础 ---------- */
+const $=id=>document.getElementById(id);
+let DEV=localStorage.getItem("devid")||"";
+let evNext=0, online=false;
+const blips=[];            /* 声音三角 {az, assoc, t0} */
+const trail=[];            /* 目标轨迹 {az, rmm, t0}，8s 渐隐 */
+const evLines=[];
+let scaleMode="auto";      /* auto | 2.5 | 5 | 10 (m) */
+const SOUND_RING_M=2.5;    /* 声音三角显示环：语音有效距离的显示约定（DOA 不测距） */
+
+function toast(msg,ms=2500){const t=$("toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),ms);}
+function qs(k){return DEV?("?"+"device_id="+DEV+(k?"&"+k:"")):("?"+k);}
+async function api(path,body){
+  try{
+    const opt=body?{method:"POST",body:JSON.stringify(body)}:{};
+    const r=await fetch(path+qs(""),opt);
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){toast("⚠ "+(j.message||r.status));return null;}
+    return j;
+  }catch(e){toast("⚠ 请求失败："+e.message);return null;}
+}
+
+/* ---------- 轮询 ---------- */
+async function pollStatus(){
+  if(!DEV)return;
+  try{
+    const r=await fetch("/api/status"+qs(""));if(!r.ok)throw 0;
+    const s=await r.json();
+    setOnline(true);render(s);
+  }catch(e){setOnline(false);}
+}
+async function pollEvents(){
+  if(!DEV)return;
+  try{
+    const r=await fetch("/api/events"+qs("since="+evNext));if(!r.ok)throw 0;
+    const j=await r.json();
+    evNext=j.next||evNext;
+    (j.events||[]).forEach(ev=>{
+      pushEv(ev);
+      if(ev.type==="SOUND_ASSOC"||ev.type==="SOUND_UNASSOC"){
+        blips.push({az:ev.v1,assoc:ev.type==="SOUND_ASSOC",t0:performance.now()});
+      }
+    });
+  }catch(e){}
+}
+function setOnline(v){online=v;$("hdot").classList.toggle("on",v);}
+
+/* ---------- 右侧面板渲染 ---------- */
+const stName={motion:"运动",breath:"呼吸",approach:"靠近",depart:"远离",none:"无"};
+function setSeg(id,v){document.querySelectorAll("#"+id+" button").forEach(b=>b.classList.toggle("act",b.dataset.v===v));}
+function render(s){
+  setSeg("seg_mode",s.mode);setSeg("seg_sub",s.submode);setSeg("seg_oor",s.oor);
+  $("cmdbox").classList.toggle("hidden",s.mode!=="command");
+  $("v_az").textContent=s.azimuth!=null?s.azimuth.toFixed(0)+"°":"--";
+  $("v_conf").textContent=s.conf!=null?s.conf.toFixed(2):"--";
+  $("v_servo").textContent=s.servo.toFixed(1)+"°"+(s.moving?" ⏵":"");
+  const rt=s.radar.target;
+  if(rt.valid){
+    trail.push({az:rt.azimuth,rmm:rt.range_mm,t0:performance.now()});
+    while(trail.length&&performance.now()-trail[0].t0>8000)trail.shift();
+  }
+  $("v_online").textContent=s.radar.online?"● 在线":"✕ 离线";
+  $("v_online").style.color=s.radar.online?"var(--ok)":"var(--err)";
+  $("v_state").innerHTML=rt.valid?'<span class="st '+rt.state+'">'+stName[rt.state]+"</span>":'<span class="st none">无目标</span>';
+  $("v_rng").textContent=rt.valid?(rt.range_mm/1000).toFixed(2)+"m / "+rt.azimuth.toFixed(0)+"°":"--";
+  $("v_rconf").textContent=rt.rb_conf+" / "+rt.ang_conf;
+  $("v_rawang").textContent=rt.valid&&rt.azimuth!=null?("az "+rt.azimuth.toFixed(0)+"°"):"--";
+  $("v_assoc").textContent=s.fusion.evaluated?(s.fusion.associated?"✓ 关联 (diff "+s.fusion.diff.toFixed(0)+"°)":"✕ 未关联"):"--";
+  $("v_assoc").style.color=s.fusion.associated?"var(--ok)":"var(--tx2)";
+  $("v_fidx").textContent=s.fusion.evaluated?s.fusion.range_mm+"mm":"";
+  window._st=s;   /* 供画布使用 */
+}
+function pushEv(ev){
+  const d=new Date();
+  const hh=String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")+":"+String(d.getSeconds()).padStart(2,"0");
+  evLines.unshift(hh+" <b>"+ev.type.replace(/_/g," ")+"</b> "+(ev.v1||"")+(ev.v2?" / "+ev.v2:""));
+  if(evLines.length>40)evLines.pop();
+  $("evlog").innerHTML=evLines.join("<br>");
+  $("evlog").scrollTop=0;
+}
+
+/* ---------- 控件 ---------- */
+function segClick(id,field){
+  $(id).addEventListener("click",e=>{
+    const b=e.target.closest("button");if(!b)return;
+    const body={};body[field]=b.dataset.v;
+    api("/api/mode",body).then(j=>{if(j){toast("✓ 已更新");pollStatus();}});
+  });
+}
+segClick("seg_mode","mode");segClick("seg_sub","submode");segClick("seg_oor","oor");
+$("seg_scale").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  scaleMode=b.dataset.v;
+  document.querySelectorAll("#seg_scale button").forEach(x=>x.classList.toggle("act",x===b));
+  $("scale_hint").textContent=scaleMode==="auto"?"跟随目标距离自动缩放":"固定量程 "+scaleMode+"m";
+});
+$("btn_still").onclick=()=>{api("/api/mode",{still_min:parseInt($("still_min").value||"0")||0}).then(j=>{if(j){toast("✓ 长静止告警已设置");pollStatus();}});};
+
+/* 12 个钟点指向按钮（3~9 点在舵机范围内） */
+["3oc","4oc","5oc","6oc","7oc","8oc","9oc"].forEach(d=>{
+  const b=document.createElement("button");b.className="btn";b.textContent=d.replace("oc","点");
+  b.onclick=()=>api("/api/point",{dir:d}).then(j=>{if(j)toast("✓ 已指向 "+d.replace("oc","点"));});
+  $("ocbtns").appendChild(b);
+});
+$("btn_pt").onclick=()=>api("/api/point",{angle:parseFloat($("pt_ang").value||"0")}).then(j=>{if(j)toast("✓ 已转向");});
+$("btn_shake").onclick=()=>{toast("摇动中 ~7s…",7000);api("/api/shake",{});};
+$("btn_save_id").onclick=()=>{
+  DEV=$("devid").value.trim().toUpperCase();
+  if(DEV.length!==6){toast("DeviceID 需 6 位（串口日志查看）");return;}
+  localStorage.setItem("devid",DEV);evNext=0;pollStatus();pollEvents();toast("✓ 已保存");
+};
+$("devid").value=DEV;
+
+/* ---------- PPI 画布 ---------- */
+const cv=$("ppi"),cx2=cv.getContext("2d");
+function azXY(azDeg,r){const a=azDeg*Math.PI/180;return[cv.width/2+Math.sin(a)*r,cv.height/2-Math.cos(a)*r];}
+const stColor={motion:"#f0883e",breath:"#3fb950",approach:"#58a6ff",depart:"#bc8cff",none:"#8b949e"};
+const stIcon={motion:"🏃",breath:"🫁",approach:"→",depart:"←",none:"?"};
+
+function niceStep(m){for(const s of[0.5,1,2,5,10])if(m/s<=5)return s;return 10;}
+
+function draw(){
+  const W=cv.clientWidth,H=cv.clientHeight;
+  if(cv.width!==W*devicePixelRatio){cv.width=W*devicePixelRatio;cv.height=H*devicePixelRatio;}
+  const g=cx2,DPR=devicePixelRatio;
+  g.setTransform(DPR,0,0,DPR,0,0);
+  g.clearRect(0,0,W,H);
+  const cx=W/2,cy=H/2,R=Math.min(W,H)/2-30;
+  const s=window._st;
+
+  /* 雷达扇区 4~8点 (az 120°~240°) */
+  g.beginPath();g.moveTo(cx,cy);g.arc(cx,cy,R,azRad(120),azRad(240));g.closePath();
+  g.fillStyle="rgba(88,166,255,.06)";g.fill();
+  [120,240].forEach(a=>{const[x1,y1]=azXY(a,R);g.beginPath();g.moveTo(cx,cy);g.lineTo(x1,y1);g.strokeStyle="rgba(88,166,255,.35)";g.setLineDash([4,4]);g.stroke();g.setLineDash([]);});
+
+  /* 距离环与量程 */
+  let maxM=2.5;
+  if(s&&s.radar.target.valid)maxM=Math.max(2.5,s.radar.target.range_mm/1000*1.25);
+  if(scaleMode!=="auto")maxM=parseFloat(scaleMode);
+  const step=niceStep(maxM);
+  g.font="11px ui-monospace,monospace";g.textAlign="left";
+  for(let m=step;m<=maxM+0.001;m+=step){
+    g.beginPath();g.arc(cx,cy,R*m/maxM,0,2*Math.PI);
+    g.strokeStyle="rgba(139,148,158,.25)";g.stroke();
+    const[tx,ty]=azXY(0,R*m/maxM);g.fillStyle="rgba(139,148,158,.6)";g.fillText(m<1?(m*100)+"cm":m+"m",tx+4,ty+2);
+  }
+
+  /* 钟点刻度与标签 */
+  g.textAlign="center";g.textBaseline="middle";
+  for(let h=0;h<12;h++){
+    const az=h*30,[x1,y1]=azXY(az,R);
+    g.beginPath();g.arc(x1,y1,h%3===0?3:1.5,0,2*Math.PI);g.fillStyle="rgba(230,237,243,.5)";g.fill();
+    if(h%3===0){const[tx,ty]=azXY(az,R+16);g.fillStyle="rgba(139,148,158,.9)";g.font="12px sans-serif";g.fillText(["12","3","6","9"][h/3]+"点",tx,ty);}
+  }
+
+  /* 声音有效环（量程 > 2.5m 时画出，红色虚线标注；声音三角落在此环） */
+  const rSound=R*Math.min(1,SOUND_RING_M/maxM);
+  if(maxM>SOUND_RING_M+0.1){
+    g.beginPath();g.arc(cx,cy,rSound,0,2*Math.PI);
+    g.strokeStyle="rgba(248,81,73,.35)";g.setLineDash([2,5]);g.stroke();g.setLineDash([]);
+    g.fillStyle="rgba(248,81,73,.6)";g.font="10px sans-serif";g.textAlign="left";
+    const[lx,ly]=azXY(45,rSound);g.fillText("语音 "+SOUND_RING_M+"m",lx+3,ly-3);
+  }
+
+  /* 舵机可达弧 ±90° (az 90~270) */
+  g.beginPath();g.arc(cx,cy,R+4,azRad(90),azRad(270));
+  g.strokeStyle="rgba(210,153,34,.6)";g.lineWidth=2;g.stroke();g.lineWidth=1;
+
+  /* 舵机指向针 */
+  if(s){
+    const az=180+s.servo,[x1,y1]=azXY(az,R*0.92);
+    g.beginPath();g.moveTo(cx,cy);g.lineTo(x1,y1);
+    g.strokeStyle="#d29922";g.lineWidth=2;g.stroke();
+    const[ax,ay]=azXY(az,R*0.55);
+    g.fillStyle="#d29922";g.font="11px ui-monospace";g.fillText(s.servo.toFixed(0)+"°",ax,ay);
+    g.lineWidth=1;
+  }
+
+  /* 本机 */
+  g.beginPath();g.arc(cx,cy,7,0,2*Math.PI);g.fillStyle="#e6edf3";g.fill();
+  g.beginPath();g.arc(cx,cy,11,0,2*Math.PI);g.strokeStyle="rgba(230,237,243,.4)";g.stroke();
+
+  /* 声音三角（渐隐，落在 2.5m 声音环上） */
+  const now=performance.now();
+  for(let i=blips.length-1;i>=0;i--){
+    const b=blips[i],age=(now-b.t0)/1000;
+    if(age>3){blips.splice(i,1);continue;}
+    const alpha=1-age/3,[x1,y1]=azXY(b.az,rSound+10);
+    g.save();g.globalAlpha=alpha;
+    g.shadowColor="#f85149";g.shadowBlur=14;
+    g.beginPath();g.moveTo(x1,y1+8);g.lineTo(x1-8,y1-6);g.lineTo(x1+8,y1-6);g.closePath();
+    g.fillStyle="#f85149";if(b.assoc){g.fill();}else{g.strokeStyle="#f85149";g.lineWidth=2;g.stroke();g.lineWidth=1;}
+    g.restore();
+  }
+
+  /* 目标轨迹尾迹（8s 渐隐；两簇点=雷达在两个反射体间切换） */
+  for(const p of trail){
+    const age=(performance.now()-p.t0)/1000;
+    const[tx,ty]=azXY(p.az,p.rmm/1000*R/maxM);
+    g.beginPath();g.arc(tx,ty,2.5,0,2*Math.PI);
+    g.fillStyle="rgba(88,166,255,"+(0.5*(1-age/8)).toFixed(3)+")";g.fill();
+  }
+
+  /* 目标方框 */
+  if(s&&s.radar.target.valid){
+    const t=s.radar.target,r=t.range_mm/1000*R/maxM;
+    const[x1,y1]=azXY(t.azimuth,r);
+    const c=stColor[t.state]||"#8b949e";
+    const weak=t.rb_conf<12||t.ang_conf<8;
+    g.save();if(weak)g.globalAlpha=.45;
+    g.strokeStyle=c;g.lineWidth=2;
+    g.strokeRect(x1-19,y1-19,38,38);
+    g.font="18px sans-serif";g.textAlign="center";
+    g.fillStyle=c;g.fillText(stIcon[t.state]||"?",x1,y1+1);
+    g.font="11px ui-monospace";
+    g.fillText((t.range_mm/1000).toFixed(2)+"m "+t.azimuth.toFixed(0)+"°",x1,y1+33);
+    if(weak)g.fillText("低置信",x1,y1-28);
+    g.restore();
+    /* 关联连线：找最近的关联三角 */
+    if(s.fusion.associated){
+      for(const b of blips){
+        if(b.assoc&&performance.now()-b.t0<3000){
+          const[bx,by]=azXY(b.az,rSound+10);
+          g.save();g.globalAlpha=.5;
+          g.beginPath();g.moveTo(x1,y1);g.lineTo(bx,by);
+          g.strokeStyle="#f85149";g.setLineDash([5,5]);g.stroke();g.setLineDash([]);g.restore();
+          break;
+        }
+      }
+    }
+  }
+  /* 图例 */
+  g.textAlign="left";g.textBaseline="middle";g.font="11px sans-serif";
+  const lg=[["#e6edf3","本机"],["#f0883e","目标方框(状态色)"],["#f85149","声音三角@"+SOUND_RING_M+"m环"],["#d29922","舵机指向"],["#58a6ff","雷达扇区/轨迹"]];
+  lg.forEach((it,i)=>{
+    const y=14+i*16;
+    g.fillStyle=it[0];g.fillRect(10,y-4,8,8);
+    g.fillStyle="rgba(139,148,158,.95)";g.fillText(it[1],24,y);
+  });
+  g.textBaseline="alphabetic";
+  requestAnimationFrame(draw);
+}
+function azRad(deg){return (deg-90)*Math.PI/180;}   /* CSS/canvas 极角：0°=右，钟点az=0°(上) → -90°偏移 */
+/* 修正：azXY 用 sin/cos 直接换算，azRad 仅用于 arc() 起止角 */
+requestAnimationFrame(draw);
+
+/* ---------- 启动 ---------- */
+setInterval(pollStatus,500);
+setInterval(pollEvents,1000);
+pollStatus();pollEvents();
+if(!DEV)toast("请填入 DeviceID（设备串口日志中查看，6 位）",5000);
+</script>
+</body>
+</html>
