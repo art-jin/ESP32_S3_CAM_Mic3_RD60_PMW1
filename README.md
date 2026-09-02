@@ -123,4 +123,4 @@ main/
 
 ## License
 
-MIT（见 LICENSE）
+Apache-2.0（见 [LICENSE](LICENSE)）
