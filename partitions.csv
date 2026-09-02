@@ -1,0 +1,14 @@
+# ESP32-S3-CAM + 3DMIC-291 partition table (2 MB flash)
+#
+# Keep nvs at 0x9000 (matches IDF default) so existing device IDs survive
+# re-flash. coredump partition (64 KB) captures panic dumps for post-mortem
+# analysis (idf.py coredump-info / coredump-debug).
+#
+# Total: 24K (nvs) + 4K (phy) + 1024K (app) + 64K (coredump) = 1116 KB,
+# leaves ~900 KB spare on 2 MB flash.
+#
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     ,        0x1000,
+factory,  app,  factory, ,        1M,
+coredump, data, coredump,,        0x10000,

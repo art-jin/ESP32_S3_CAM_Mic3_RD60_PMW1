@@ -1,0 +1,13 @@
+# Project-level Kconfig defaults. Applied when sdkconfig is regenerated.
+# Manual edits to sdkconfig override these.
+
+# Custom partition table (adds coredump partition for panic dumps).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Core dump to flash — survives reboot, readable via idf.py coredump-info.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
