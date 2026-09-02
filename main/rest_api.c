@@ -256,6 +256,9 @@ static esp_err_t handler_logs(httpd_req_t *req)
 /* POST /api/mode?device_id=XXXX
  * Body: {"mode":"command"} or {"mode":"track"}
  * Optional: {"mode":"command","timeout":0}  (0 = no auto-return)
+ * Optional (Phase 3, US-005/US-006): "submode":"audio_only|fusion|radar_follow"
+ * and/or "oor":"hold|clamp|home|scan". At least one of mode/submode/oor
+ * must be present; fields are applied independently.
  */
 static esp_err_t handler_mode(httpd_req_t *req)
 {
@@ -271,22 +274,67 @@ static esp_err_t handler_mode(httpd_req_t *req)
     if (!read_body(req, body, sizeof(body))) return ESP_OK;
 
     char mode_str[16] = {0};
-    if (!json_get_str(body, "mode", mode_str, sizeof(mode_str))) {
-        return send_error(req, 400, "bad_request", "missing 'mode' field");
+    char sub_str[16] = {0};
+    char oor_str[8] = {0};
+    bool has_mode = json_get_str(body, "mode", mode_str, sizeof(mode_str));
+    bool has_sub  = json_get_str(body, "submode", sub_str, sizeof(sub_str));
+    bool has_oor  = json_get_str(body, "oor", oor_str, sizeof(oor_str));
+
+    if (!has_mode && !has_sub && !has_oor) {
+        return send_error(req, 400, "bad_request",
+                          "need at least one of 'mode'/'submode'/'oor'");
     }
 
-    int timeout = -1;  /* -1 = use default */
-    json_get_int(body, "timeout", &timeout);  /* optional */
-
-    if (strcmp(mode_str, "command") == 0) {
-        mode_manager_set(MODE_COMMAND, timeout);
-        return send_json_ok(req, "{\"ok\":true,\"mode\":\"command\"}");
-    } else if (strcmp(mode_str, "track") == 0) {
-        mode_manager_set(MODE_TRACK, 0);
-        return send_json_ok(req, "{\"ok\":true,\"mode\":\"track\"}");
-    } else {
-        return send_error(req, 400, "bad_request", "mode must be 'track' or 'command'");
+    if (has_mode) {
+        if (strcmp(mode_str, "command") == 0) {
+            int timeout = -1;  /* -1 = use default */
+            json_get_int(body, "timeout", &timeout);
+            mode_manager_set(MODE_COMMAND, timeout);
+        } else if (strcmp(mode_str, "track") == 0) {
+            mode_manager_set(MODE_TRACK, 0);
+        } else {
+            return send_error(req, 400, "bad_request",
+                              "mode must be 'track' or 'command'");
+        }
     }
+
+    if (has_sub) {
+        if (strcmp(sub_str, "audio_only") == 0) {
+            mode_manager_set_submode(TRACK_AUDIO_ONLY);
+        } else if (strcmp(sub_str, "fusion") == 0) {
+            mode_manager_set_submode(TRACK_FUSION);
+        } else if (strcmp(sub_str, "radar_follow") == 0) {
+            mode_manager_set_submode(TRACK_RADAR_FOLLOW);
+        } else {
+            return send_error(req, 400, "bad_request",
+                              "submode must be audio_only|fusion|radar_follow");
+        }
+    }
+
+    if (has_oor) {
+        if (strcmp(oor_str, "hold") == 0) {
+            mode_manager_set_oor_policy(OOR_HOLD);
+        } else if (strcmp(oor_str, "clamp") == 0) {
+            mode_manager_set_oor_policy(OOR_CLAMP);
+        } else if (strcmp(oor_str, "home") == 0) {
+            mode_manager_set_oor_policy(OOR_HOME);
+        } else if (strcmp(oor_str, "scan") == 0) {
+            mode_manager_set_oor_policy(OOR_SCAN);
+        } else {
+            return send_error(req, 400, "bad_request",
+                              "oor must be hold|clamp|home|scan");
+        }
+    }
+
+    static const char *subnames[] = {"audio_only", "fusion", "radar_follow"};
+    static const char *oornames[] = {"hold", "clamp", "home", "scan"};
+    char resp[96];
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"mode\":\"%s\",\"submode\":\"%s\",\"oor\":\"%s\"}",
+             mode_manager_get() == MODE_COMMAND ? "command" : "track",
+             subnames[mode_manager_get_submode()],
+             oornames[mode_manager_get_oor_policy()]);
+    return send_json_ok(req, resp);
 }
 
 /* POST /api/point?device_id=XXXX

@@ -8,6 +8,8 @@
 #include "servo.h"
 #include "evlog.h"
 #include "fusion.h"
+#include "mode_manager.h"
+#include "radar.h"
 
 static const char *TAG = "tracker";
 
@@ -16,6 +18,12 @@ static tracker_mode_t   s_mode = TRACKER_MODE_IDLE;
 static bool             s_enabled = true;
 static float            s_last_target_deg = 0.0f;   /* last commanded angle */
 static bool             s_have_target = false;      /* any command issued yet */
+static int64_t          s_last_doa_cmd_us = 0;      /* last DOA-driven command */
+static bool             s_oor_active = false;       /* OOR hysteresis latch */
+
+/* In fusion mode, sound keeps priority for this long after its last
+ * servo command; only then may the radar take over (US-005). */
+#define FUSION_SOUND_HOLD_MS 3000
 
 /* Boundary-scan state: when the source is outside mechanical range, the
  * servo oscillates ±scan_amplitude_deg at the nearest boundary. */
@@ -108,6 +116,114 @@ void tracker_init(const tracker_config_t *cfg)
              s_cfg.scan_amplitude_deg, s_cfg.scan_rate_deg_per_s);
 }
 
+/* True when the radar is allowed to drive the servo right now: sub-mode
+ * is fusion/radar_follow, link is up, and the primary target is valid
+ * with trustworthy range+angle. */
+static bool radar_can_drive(void)
+{
+    if (mode_manager_get_submode() == TRACK_AUDIO_ONLY) return false;
+    radar_target_t t;
+    return radar_is_online() && radar_get_target(&t)
+        && t.rb_conf >= 12 && t.angle_conf >= 8;
+}
+
+/* Shared command path for both drivers (DOA and radar). Applies the
+ * per-frame velocity cap and deadband, then commands the servo.
+ * from_doa stamps s_last_doa_cmd_us so the fusion sub-mode can give
+ * sound priority. Returns true when a command was actually issued. */
+static bool command_target(float target, bool from_doa)
+{
+    /* Deadband check: skip if change is too small. */
+    if (s_have_target && fabsf(target - s_last_target_deg) < s_cfg.deadband_deg) {
+        s_mode = TRACKER_MODE_IDLE;
+        return false;
+    }
+
+    /* Velocity limit: cap single-frame target change to prevent jarring
+     * large-angle jumps (e.g., user walks 3oc→7oc = 120° step); the
+     * remainder carries over to subsequent frames naturally.
+     *
+     * Rotating-array (array on servo): 15°/frame (~300°/s at 20 Hz). Matches
+     * JS6620's physical speed limit AND keeps the servo-buzz coupling window
+     * short — large sudden motions excite more PCB vibration.
+     *
+     * Fixed-array (SuperMini): 30°/frame (~600°/s at 20 Hz). The feedback
+     * path through PCB is gone, so we can move twice as fast per frame
+     * without risking oscillation. MG90S is rated 600°/s, so this matches
+     * its physical limit too. */
+    if (s_have_target) {
+        float diff = target - s_last_target_deg;
+#if MIC_ARRAY_MOUNTED_ON_SERVO
+        float max_delta = 15.0f;
+#else
+        float max_delta = 30.0f;
+#endif
+        if (diff > max_delta) target = s_last_target_deg + max_delta;
+        if (diff < -max_delta) target = s_last_target_deg - max_delta;
+    }
+
+    /* Command the servo. */
+    evlog_record(EV_SERVO_CMD, SRC_TRACKER, (int16_t)target);
+    servo_set_angle_deg(target);
+    s_last_target_deg = target;
+    s_last_update_us = esp_timer_get_time();   /* mark command time for idle-return dt */
+    if (from_doa) s_last_doa_cmd_us = s_last_update_us;
+    s_have_target = true;
+    s_mode = TRACKER_MODE_TRACKING;
+    return true;
+}
+
+void tracker_radar_update(void)
+{
+    if (!s_enabled) return;
+    if (mode_manager_get_submode() == TRACK_AUDIO_ONLY) return;
+    if (servo_is_moving()) return;              /* motion-pause, as DOA path */
+    if (!radar_can_drive()) return;
+
+    /* fusion: sound has priority — stand down while a DOA command is
+     * recent (US-005). */
+    if (mode_manager_get_submode() == TRACK_FUSION &&
+        s_last_doa_cmd_us > 0 &&
+        esp_timer_get_time() - s_last_doa_cmd_us
+            < (int64_t)FUSION_SOUND_HOLD_MS * 1000LL) {
+        return;
+    }
+
+    radar_target_t t;
+    radar_get_target(&t);   /* validity + conf guaranteed by radar_can_drive */
+
+    float target = t.azimuth_deg - 180.0f + s_cfg.home_deg;
+
+    /* Same OOR policy as the sound path (US-006). Boundary oscillation
+     * makes no sense for a stable radar angle, so scan maps to clamp. */
+    oor_policy_t pol = mode_manager_get_oor_policy();
+    if (fabsf(target) > 90.0f) {
+        if (!s_oor_active) {
+            s_oor_active = true;
+            ESP_LOGI(TAG, "OOR[%s]: radar target=%.1f° unreachable",
+                     pol == OOR_HOLD ? "hold" :
+                     pol == OOR_CLAMP || pol == OOR_SCAN ? "clamp" : "home",
+                     target);
+        }
+        switch (pol) {
+        case OOR_CLAMP:
+        case OOR_SCAN:
+            target = (target > 0.0f) ? SERVO_ANGLE_MAX_DEG : SERVO_ANGLE_MIN_DEG;
+            break;
+        case OOR_HOME:
+            target = s_cfg.home_deg;
+            break;
+        case OOR_HOLD:
+        default:
+            return;
+        }
+    } else {
+        s_oor_active = false;
+    }
+
+    command_target(target, false);
+}
+
 void tracker_update(const doa_result_t *doa)
 {
     int64_t now_us = esp_timer_get_time();
@@ -127,6 +243,13 @@ void tracker_update(const doa_result_t *doa)
 
     if (!s_enabled) {
         s_mode = TRACKER_MODE_DISABLED;
+        return;
+    }
+    /* radar_follow sub-mode: only the radar drives the servo (US-005);
+     * the whole sound pipeline — including idle-return — is bypassed and
+     * tracker_radar_update() owns the servo. */
+    if (mode_manager_get_submode() == TRACK_RADAR_FOLLOW) {
+        s_mode = TRACKER_MODE_SUPPRESSED;
         return;
     }
     if (doa == NULL) {
@@ -165,8 +288,11 @@ void tracker_update(const doa_result_t *doa)
      * motion-pause on the next call, so the loop naturally limit-cycles
      * between "step, holdoff, step" until home is reached.
      * Stops within 0.5° of home to avoid buzzing on the centering pulse. */
+    /* In fusion/radar_follow with a live radar target, the radar path owns
+     * the servo — don't walk home underneath it (US-005). */
     if (s_have_target &&
         s_cfg.idle_return_threshold_s > 0.0f &&
+        !radar_can_drive() &&
         (now_us - s_last_3mic_us) >=
             (int64_t)(s_cfg.idle_return_threshold_s * 1e6f)) {
         float current = servo_get_angle_deg();
@@ -306,62 +432,90 @@ void tracker_update(const doa_result_t *doa)
         target = alpha_room - 180.0f + s_cfg.home_deg;
     }
 
-    /* OUT-OF-RANGE SUPPRESSION: if the unclamped target is far outside
-     * the mechanical range, the source is in a direction the servo can
-     * never point at. Rather than saturating at one limit and then
-     * oscillating when DOA noise flips the reading to the other side,
-     * hold the last commanded position and wait for the source to come
-     * back into a trackable arc. */
-    if (s_cfg.out_of_range_deg > 0.0f &&
-        (target >  s_cfg.out_of_range_deg ||
-         target < -s_cfg.out_of_range_deg)) {
-        s_mode = TRACKER_MODE_SUPPRESSED;
-        return;
-    }
-
-    /* BOUNDARY SCAN: target is within out_of_range but past the mechanical
-     * clamp. Instead of holding still at the limit, oscillate ±amplitude
-     * around the nearest boundary to signal "I hear you but can't reach you."
-     * Hysteresis (enter > exit) prevents flicker between TRACKING and SCAN. */
-    if (s_cfg.scan_enter_deg > 0.0f) {
-        bool in_scan_now = (s_mode == TRACKER_MODE_OUT_OF_RANGE_SCAN);
-        bool should_scan = in_scan_now
-            ? (fabsf(target) >  s_cfg.scan_exit_deg)
-            : (fabsf(target) >  s_cfg.scan_enter_deg);
-
-        if (should_scan) {
-            s_scan_center_deg = (target > 0.0f)
-                ? SERVO_ANGLE_MAX_DEG : SERVO_ANGLE_MIN_DEG;
-            if (!in_scan_now) {
-                s_scan_phase_us = now_us;
-                ESP_LOGI(TAG, "scan enter: target=%.1f center=%.1f",
-                         target, s_scan_center_deg);
-            }
-            /* Triangle wave: period = 4*amplitude/rate (s).
-             * phase 0..0.25 → tri 0..1; 0.25..0.75 → 1..-1; 0.75..1 → -1..0
-             * tri ∈ [-1, +1]; scan swings INWARD from boundary. */
-            float elapsed_s = (float)(now_us - s_scan_phase_us) / 1e6f;
-            float period_s  = (4.0f * s_cfg.scan_amplitude_deg)
-                            /  s_cfg.scan_rate_deg_per_s;
-            float phase = fmodf(elapsed_s / period_s, 1.0f);
-            if (phase < 0.0f) phase += 1.0f;
-            float tri;
-            if      (phase < 0.25f) tri =  phase * 4.0f;
-            else if (phase < 0.75f) tri =  2.0f - phase * 4.0f;
-            else                    tri =  phase * 4.0f - 4.0f;
-            float sign = (s_scan_center_deg > 0.0f) ? -1.0f : +1.0f;
-            float scan_target = s_scan_center_deg
-                              + sign * tri * s_cfg.scan_amplitude_deg;
-            servo_set_angle_deg(scan_target);
-            evlog_record(EV_SERVO_CMD, SRC_TRACKER, (int16_t)scan_target);
-            s_last_target_deg = scan_target;
-            s_last_update_us  = now_us;
-            s_last_3mic_us    = now_us;   /* user speaking; suppress idle return */
-            s_mode = TRACKER_MODE_OUT_OF_RANGE_SCAN;
+    /* OUT-OF-RANGE POLICY (US-006): the source azimuth maps beyond the
+     * mechanical ±90° (9点~3点). Behaviour is runtime-configurable:
+     *   hold  — keep last position, no command (default)
+     *   clamp — command the nearest mechanical boundary
+     *   home  — command home once, hold there
+     *   scan  — legacy v2.5 behaviour: far OOR suppress + boundary
+     *           oscillation ("I hear you but can't reach you")
+     * Hysteresis (enter 92° / exit 88°) prevents flicker at the boundary. */
+    oor_policy_t pol = mode_manager_get_oor_policy();
+    if (pol == OOR_SCAN) {
+        /* Legacy far-OOR suppression (out_of_range_deg, default 150°). */
+        if (s_cfg.out_of_range_deg > 0.0f &&
+            (target >  s_cfg.out_of_range_deg ||
+             target < -s_cfg.out_of_range_deg)) {
+            s_mode = TRACKER_MODE_SUPPRESSED;
             return;
         }
-        if (in_scan_now) {
-            ESP_LOGI(TAG, "scan exit: target=%.1f", target);
+        if (s_cfg.scan_enter_deg > 0.0f) {
+            bool in_scan_now = (s_mode == TRACKER_MODE_OUT_OF_RANGE_SCAN);
+            bool should_scan = in_scan_now
+                ? (fabsf(target) >  s_cfg.scan_exit_deg)
+                : (fabsf(target) >  s_cfg.scan_enter_deg);
+
+            if (should_scan) {
+                s_scan_center_deg = (target > 0.0f)
+                    ? SERVO_ANGLE_MAX_DEG : SERVO_ANGLE_MIN_DEG;
+                if (!in_scan_now) {
+                    s_scan_phase_us = now_us;
+                    ESP_LOGI(TAG, "scan enter: target=%.1f center=%.1f",
+                             target, s_scan_center_deg);
+                }
+                /* Triangle wave: period = 4*amplitude/rate (s).
+                 * phase 0..0.25 → tri 0..1; 0.25..0.75 → 1..-1; 0.75..1 → -1..0
+                 * tri ∈ [-1, +1]; scan swings INWARD from boundary. */
+                float elapsed_s = (float)(now_us - s_scan_phase_us) / 1e6f;
+                float period_s  = (4.0f * s_cfg.scan_amplitude_deg)
+                                /  s_cfg.scan_rate_deg_per_s;
+                float phase = fmodf(elapsed_s / period_s, 1.0f);
+                if (phase < 0.0f) phase += 1.0f;
+                float tri;
+                if      (phase < 0.25f) tri =  phase * 4.0f;
+                else if (phase < 0.75f) tri =  2.0f - phase * 4.0f;
+                else                    tri =  phase * 4.0f - 4.0f;
+                float sign = (s_scan_center_deg > 0.0f) ? -1.0f : +1.0f;
+                float scan_target = s_scan_center_deg
+                                  + sign * tri * s_cfg.scan_amplitude_deg;
+                servo_set_angle_deg(scan_target);
+                evlog_record(EV_SERVO_CMD, SRC_TRACKER, (int16_t)scan_target);
+                s_last_target_deg = scan_target;
+                s_last_update_us  = now_us;
+                s_last_3mic_us    = now_us;   /* user speaking; suppress idle return */
+                s_mode = TRACKER_MODE_OUT_OF_RANGE_SCAN;
+                return;
+            }
+            if (in_scan_now) {
+                ESP_LOGI(TAG, "scan exit: target=%.1f", target);
+            }
+        }
+    } else {
+        bool in_oor = s_oor_active
+            ? (fabsf(target) > 88.0f)
+            : (fabsf(target) > 92.0f);
+        if (in_oor) {
+            if (!s_oor_active) {
+                s_oor_active = true;
+                ESP_LOGI(TAG, "OOR[%s]: target=%.1f° unreachable",
+                         pol == OOR_HOLD ? "hold" :
+                         pol == OOR_CLAMP ? "clamp" : "home", target);
+            }
+            switch (pol) {
+            case OOR_CLAMP:
+                target = (target > 0.0f) ? SERVO_ANGLE_MAX_DEG
+                                         : SERVO_ANGLE_MIN_DEG;
+                break;
+            case OOR_HOME:
+                target = s_cfg.home_deg;
+                break;
+            case OOR_HOLD:
+            default:
+                s_mode = TRACKER_MODE_SUPPRESSED;
+                return;
+            }
+        } else {
+            s_oor_active = false;
         }
     }
 
@@ -384,48 +538,14 @@ void tracker_update(const doa_result_t *doa)
         target = confirmed_target;
     }
 
-    /* Deadband check: skip if change is too small. */
-    if (s_have_target && fabsf(target - s_last_target_deg) < s_cfg.deadband_deg) {
-        s_mode = TRACKER_MODE_IDLE;
-        return;
-    }
-
-    /* Velocity limit: cap single-frame target change to prevent jarring
-     * large-angle jumps (e.g., user walks 3oc→7oc = 120° step); the
-     * remainder carries over to subsequent frames naturally.
-     *
-     * Rotating-array (array on servo): 15°/frame (~300°/s at 20 Hz). Matches
-     * JS6620's physical speed limit AND keeps the servo-buzz coupling window
-     * short — large sudden motions excite more PCB vibration.
-     *
-     * Fixed-array (SuperMini): 30°/frame (~600°/s at 20 Hz). The feedback
-     * path through PCB is gone, so we can move twice as fast per frame
-     * without risking oscillation. MG90S is rated 600°/s, so this matches
-     * its physical limit too. */
-    if (s_have_target) {
-        float diff = target - s_last_target_deg;
-#if MIC_ARRAY_MOUNTED_ON_SERVO
-        float max_delta = 15.0f;
-#else
-        float max_delta = 30.0f;
-#endif
-        if (diff > max_delta) target = s_last_target_deg + max_delta;
-        if (diff < -max_delta) target = s_last_target_deg - max_delta;
-    }
-
-    /* Command the servo. Sound↔radar association metadata (Phase 2):
-     * evaluated on every accepted DOA, never gates the motion itself. */
+    /* Sound↔radar association metadata (Phase 2): evaluated on every
+     * accepted DOA, never gates the motion itself. */
     fusion_evaluate(doa->azimuth_deg);
     if (!s_have_target) {
         evlog_record(EV_DOA_FIRST, (uint8_t)doa->stable_sextant,
                      (int16_t)doa->azimuth_deg);
     }
-    evlog_record(EV_SERVO_CMD, SRC_TRACKER, (int16_t)target);
-    servo_set_angle_deg(target);
-    s_last_target_deg = target;
-    s_last_update_us = now_us;   /* mark command time for idle-return dt */
-    s_have_target = true;
-    s_mode = TRACKER_MODE_TRACKING;
+    command_target(target, true);
 }
 
 tracker_mode_t tracker_get_mode(void)
@@ -455,6 +575,8 @@ void tracker_reset_state(void)
     s_last_target_deg = 0.0f;
     s_scan_phase_us = 0;
     s_scan_center_deg = 0.0f;
+    s_last_doa_cmd_us = 0;
+    s_oor_active = false;
 }
 
 void tracker_set_config(const tracker_config_t *cfg)

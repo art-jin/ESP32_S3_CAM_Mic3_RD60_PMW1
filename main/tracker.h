@@ -103,6 +103,12 @@ void tracker_init(const tracker_config_t *cfg);
 /* Per-frame update. Called from mic_task after doa_process(). */
 void tracker_update(const doa_result_t *doa);
 
+/* Radar-driven servo path (PRD US-005). Call at the same rate as
+ * tracker_update. Active only in fusion/radar_follow sub-modes; in fusion
+ * the sound path has priority for FUSION_SOUND_HOLD_MS after each DOA
+ * command. Applies the same out-of-range policy as the sound path. */
+void tracker_radar_update(void);
+
 /* Current tracker mode (informational; tracker_update sets it). */
 tracker_mode_t tracker_get_mode(void);
 

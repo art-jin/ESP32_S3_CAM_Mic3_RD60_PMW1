@@ -126,6 +126,7 @@ static void mic_task(void *arg)
          * internally. (Phase 3 will add motion-pause to skip DOA updates
          * while the servo is moving, so servo whine doesn't feed back.) */
         tracker_update(&r);
+        tracker_radar_update(); /* radar-driven servo path (fusion/radar_follow) */
         mode_manager_tick();    /* check command-mode timeout (20Hz) */
         status_update(&r);     /* publish to global status for REST API */
 
