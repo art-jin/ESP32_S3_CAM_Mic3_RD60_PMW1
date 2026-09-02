@@ -28,8 +28,11 @@ typedef struct {
 
 void fusion_init(void);
 
-/* Called from the tracker accept path with the accepted DOA azimuth. */
-void fusion_evaluate(float doa_az_deg);
+/* Called from the tracker accept path with the accepted DOA azimuth and
+ * its frame confidence. Confidence also gates the stillness-alarm speech
+ * trigger (noise peaks pass the tracker at 0.35-0.45; real speech is
+ * higher — base-project calibration). */
+void fusion_evaluate(float doa_az_deg, float confidence);
 
 /* Snapshot for status/REST (Phase 4). */
 void fusion_get_last(fusion_result_t *out);

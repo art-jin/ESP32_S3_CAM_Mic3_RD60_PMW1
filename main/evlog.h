@@ -34,6 +34,11 @@ enum {
     EV_MODE_CHG   = 6,  /* flags=old_mode,        value=new_mode */
     EV_SHAKE_START= 7,  /* flags=0,               value=center_deg */
     EV_SHAKE_END  = 8,  /* flags=0,               value=final_deg */
+    /* Phase 4 mirrors of high-value scene events (see events.c): */
+    EV_RADAR_UP   = 9,  /* flags=0,               value=0 */
+    EV_RADAR_DOWN = 10, /* flags=0,               value=0 */
+    EV_STILL      = 11, /* flags=1=alarm/0=recover, value=range_cm */
+    EV_OOR        = 12, /* flags=oor_policy id,   value=target_deg */
 };
 
 /* Sources for EV_SERVO_CMD. */

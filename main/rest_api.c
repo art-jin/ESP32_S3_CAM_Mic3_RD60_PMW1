@@ -12,6 +12,9 @@
 #include "servo.h"
 #include "doa.h"
 #include "evlog.h"
+#include "radar.h"
+#include "fusion.h"
+#include "events.h"
 
 static const char *TAG = "rest";
 static httpd_handle_t s_server = NULL;
@@ -175,30 +178,114 @@ static esp_err_t handler_status(httpd_req_t *req)
     const char *sect_label = doa_sextant_label(st.stable_sect, DOA_MODE_3MIC);
     if (!sect_label) sect_label = "--";
 
-    char body[400];
+    /* Phase 4 (US-007): radar / fusion / sub-mode snapshot fields,
+     * read directly from the owning modules at request time. */
+    radar_target_t rt;
+    bool rt_valid = radar_get_target(&rt);
+    bool rt_online = radar_is_online();
+    fusion_result_t fr;
+    fusion_get_last(&fr);
+    static const char *subnames[] = {"audio_only", "fusion", "radar_follow"};
+    static const char *oornames[] = {"hold", "clamp", "home", "scan"};
+    /* radar_tgt_state_t values are bit masks, not sequential — map by switch. */
+    const char *rt_state;
+    switch (rt.state) {
+    case RADAR_TGT_APPROACH: rt_state = "approach"; break;
+    case RADAR_TGT_DEPART:   rt_state = "depart";   break;
+    case RADAR_TGT_MOTION:   rt_state = "motion";   break;
+    case RADAR_TGT_BREATH:   rt_state = "breath";   break;
+    default:                 rt_state = "none";     break;
+    }
+
+    char body[800];
     snprintf(body, sizeof(body),
         "{\"ok\":true,"
         "\"mode\":\"%s\","
+        "\"submode\":\"%s\","
+        "\"oor\":\"%s\","
+        "\"still_min\":%u,"
         "\"servo\":%.1f,"
         "\"moving\":%s,"
         "\"azimuth\":%.0f,"
         "\"sect\":\"%s\","
         "\"conf\":%.2f,"
+        "\"radar\":{\"online\":%s,\"target\":{\"valid\":%s,\"state\":\"%s\","
+        "\"range_mm\":%u,\"azimuth\":%.0f,\"rb_conf\":%u,\"ang_conf\":%u}},"
+        "\"fusion\":{\"evaluated\":%s,\"associated\":%s,\"doa_az\":%.0f,"
+        "\"radar_az\":%.0f,\"diff\":%.0f,\"range_mm\":%u},"
         "\"wifi\":\"%s\","
         "\"ip\":\"%s\","
         "\"host\":\"%s\""
         "}",
         st.mode == MODE_COMMAND ? "command" : "track",
+        subnames[mode_manager_get_submode()],
+        oornames[mode_manager_get_oor_policy()],
+        (unsigned)mode_manager_get_still_min(),
         st.servo_angle,
         st.servo_moving ? "true" : "false",
         st.azimuth,
         sect_label,
         st.confidence,
+        rt_online ? "true" : "false",
+        rt_valid ? "true" : "false",
+        rt_valid ? rt_state : "none",
+        rt_valid ? rt.range_mm : 0,
+        rt_valid ? rt.azimuth_deg : 0.0f,
+        rt_valid ? rt.rb_conf : 0,
+        rt_valid ? rt.angle_conf : 0,
+        fr.evaluated ? "true" : "false",
+        fr.associated ? "true" : "false",
+        fr.doa_az_deg, fr.radar_az_deg, fr.angle_diff_deg,
+        fr.range_mm,
         st.wifi_connected ? "connected" : "disconnected",
         st.ip[0] ? st.ip : "",
         st.hostname[0] ? st.hostname : "");
 
     return send_json_ok(req, body);
+}
+
+/* GET /api/events?device_id=XXXX[&since=SEQ]
+ * Returns the newest 32 scene events; pass since=<last seq seen> for
+ * incremental polling. Events older than the ring window are skipped. */
+static esp_err_t handler_events(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+
+    uint32_t since = 0;
+    char query[128], val[12];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "since", val, sizeof(val)) == ESP_OK) {
+        since = (uint32_t)strtoul(val, NULL, 10);
+    }
+
+    app_event_t evs[32];
+    uint32_t next = 0;
+    int n = events_get(evs, 32, since, &next);
+
+    char *body = malloc(256 + (size_t)n * 80);
+    if (!body) {
+        return send_error(req, 500, "oom", "cannot allocate response buffer");
+    }
+    int pos = snprintf(body, 256, "{\"ok\":true,\"next\":%lu,\"events\":[",
+                       (unsigned long)next);
+    for (int i = 0; i < n && pos > 0; i++) {
+        pos += snprintf(body + pos, 80,
+            "%s{\"seq\":%lu,\"ms\":%lu,\"type\":\"%s\",\"v1\":%d,\"v2\":%d}",
+            i ? "," : "",
+            (unsigned long)evs[i].seq,
+            (unsigned long)evs[i].uptime_ms,
+            events_type_name(evs[i].type),
+            evs[i].v1, evs[i].v2);
+    }
+    if (pos > 0 && pos < 256 + n * 80) {
+        snprintf(body + pos, 16, "]}");
+    } else {
+        free(body);
+        return send_error(req, 500, "oom", "response overflow");
+    }
+    esp_err_t r = send_json_ok(req, body);
+    free(body);
+    return r;
 }
 
 /* GET /api/logs?device_id=XXXX
@@ -279,10 +366,12 @@ static esp_err_t handler_mode(httpd_req_t *req)
     bool has_mode = json_get_str(body, "mode", mode_str, sizeof(mode_str));
     bool has_sub  = json_get_str(body, "submode", sub_str, sizeof(sub_str));
     bool has_oor  = json_get_str(body, "oor", oor_str, sizeof(oor_str));
+    int still_probe = -1;
+    bool has_still = json_get_int(body, "still_min", &still_probe);
 
-    if (!has_mode && !has_sub && !has_oor) {
+    if (!has_mode && !has_sub && !has_oor && !has_still) {
         return send_error(req, 400, "bad_request",
-                          "need at least one of 'mode'/'submode'/'oor'");
+                          "need at least one of 'mode'/'submode'/'oor'/'still_min'");
     }
 
     if (has_mode) {
@@ -326,14 +415,25 @@ static esp_err_t handler_mode(httpd_req_t *req)
         }
     }
 
+    int still_min = -1;   /* -1 = field absent */
+    json_get_int(body, "still_min", &still_min);
+    if (still_min > 1440) {
+        return send_error(req, 400, "bad_request", "still_min must be 0..1440");
+    }
+    if (still_min >= 0) {
+        mode_manager_set_still_min((uint16_t)still_min);
+    }
+
     static const char *subnames[] = {"audio_only", "fusion", "radar_follow"};
     static const char *oornames[] = {"hold", "clamp", "home", "scan"};
-    char resp[96];
+    char resp[112];
     snprintf(resp, sizeof(resp),
-             "{\"ok\":true,\"mode\":\"%s\",\"submode\":\"%s\",\"oor\":\"%s\"}",
+             "{\"ok\":true,\"mode\":\"%s\",\"submode\":\"%s\",\"oor\":\"%s\","
+             "\"still_min\":%u}",
              mode_manager_get() == MODE_COMMAND ? "command" : "track",
              subnames[mode_manager_get_submode()],
-             oornames[mode_manager_get_oor_policy()]);
+             oornames[mode_manager_get_oor_policy()],
+             (unsigned)mode_manager_get_still_min());
     return send_json_ok(req, resp);
 }
 
@@ -516,6 +616,9 @@ esp_err_t rest_api_start(void)
     static const httpd_uri_t uri_logs = {
         .uri = "/api/logs", .method = HTTP_GET, .handler = handler_logs
     };
+    static const httpd_uri_t uri_events = {
+        .uri = "/api/events", .method = HTTP_GET, .handler = handler_events
+    };
     static const httpd_uri_t uri_mode = {
         .uri = "/api/mode", .method = HTTP_POST, .handler = handler_mode
     };
@@ -532,11 +635,12 @@ esp_err_t rest_api_start(void)
     httpd_register_uri_handler(s_server, &uri_ping);
     httpd_register_uri_handler(s_server, &uri_status);
     httpd_register_uri_handler(s_server, &uri_logs);
+    httpd_register_uri_handler(s_server, &uri_events);
     httpd_register_uri_handler(s_server, &uri_mode);
     httpd_register_uri_handler(s_server, &uri_point);
     httpd_register_uri_handler(s_server, &uri_shake);
     httpd_register_uri_handler(s_server, &uri_options);
 
-    ESP_LOGI(TAG, "REST API started: /api/ping /api/status /api/logs /api/mode /api/point /api/shake");
+    ESP_LOGI(TAG, "REST API started: /api/ping /api/status /api/logs /api/events /api/mode /api/point /api/shake");
     return ESP_OK;
 }

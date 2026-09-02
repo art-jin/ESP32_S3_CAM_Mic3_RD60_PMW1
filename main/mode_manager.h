@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Dual-mode manager: TRACK (auto sound-source tracking) and COMMAND
  * (REST-directed servo positioning). Default is TRACK on boot.
@@ -55,6 +56,12 @@ track_submode_t mode_manager_get_submode(void);
 /* Out-of-range policy. Persisted in NVS. */
 void mode_manager_set_oor_policy(oor_policy_t policy);
 oor_policy_t mode_manager_get_oor_policy(void);
+
+/* Long-stillness care alarm threshold in minutes (US-009): fire
+ * STILL_ALARM when the radar target stays in breath/micro-motion state
+ * continuously for this long. 0 = disabled (default). Persisted in NVS. */
+void mode_manager_set_still_min(uint16_t minutes);
+uint16_t mode_manager_get_still_min(void);
 
 /* Called from mic_task at 20Hz. Checks command-mode timeout. */
 void mode_manager_tick(void);

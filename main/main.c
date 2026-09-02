@@ -17,6 +17,7 @@
 #include "mode_manager.h"
 #include "status.h"
 #include "evlog.h"
+#include "events.h"
 #include "radar.h"
 #include "fusion.h"
 #include "radar_probe.h"
@@ -235,6 +236,7 @@ void app_main(void)
 
     evlog_init();  /* load prior events from NVS, increment boot counter */
     evlog_record(EV_BOOT, 0, (int16_t)esp_reset_reason());
+    events_init(); /* RAM scene-event ring for /api/events (Phase 4) */
 
     ESP_LOGI(TAG, "=== 3DMIC-291 DOA + servo + REST API starting ===");
     ESP_LOGI(TAG, "  pins: CLK0=%d CLK1=%d DAT0=%d DAT1=%d",

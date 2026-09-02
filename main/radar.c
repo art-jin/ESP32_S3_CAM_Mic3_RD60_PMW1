@@ -25,6 +25,8 @@
 #include "driver/uart.h"
 
 #include "radar.h"
+#include "events.h"
+#include "mode_manager.h"
 
 #define RAD_UART_NUM    UART_NUM_1
 #define RAD_BAUD        115200
@@ -72,6 +74,16 @@ static uint32_t c_rx, c_reply, c_30, c_bad_ck, c_stray, c_miss;
 static uint16_t rd_u16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static int16_t  rd_s16(const uint8_t *p) { return (int16_t)rd_u16(p); }
 static uint32_t rd_u32(const uint8_t *p) { return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24)); }
+
+/* Speech-activity flag: set by fusion (mic_task) on each accepted DOA,
+ * consumed by the still-alarm check in the radar task. Talking counts
+ * as substantial activity for the care alarm. */
+static volatile bool s_sound_activity;
+
+void radar_notify_sound(void)
+{
+    s_sound_activity = true;
+}
 
 static const char *state_name(radar_tgt_state_t s)
 {
@@ -152,6 +164,14 @@ static void publish(uint8_t det_result, uint16_t range_mm, int16_t angle_deg,
     s_target.last_seen_ms = esp_timer_get_time() / 1000;
     xSemaphoreGive(s_lock);
 
+    if (was_valid != s_target.valid) {
+        if (s_target.valid) {
+            events_push(AEVT_TARGET_ENTER, (int16_t)s_target.azimuth_deg,
+                        (int16_t)(range_mm / 10));
+        } else {
+            events_push(AEVT_TARGET_LEAVE, (int16_t)s_target.azimuth_deg, 0);
+        }
+    }
     if (was_valid != s_target.valid || was_state != s_target.state) {
         ESP_LOGI(TAG, "%s: %s range=%umm angle=%+d° filt=%+d° az=%.0f° conf=%u/%u",
                  s_target.valid ? "target" : "cleared",
@@ -290,6 +310,7 @@ static void radar_task(void *arg)
             s_online = miss < RAD_OFFLINE_MISS;
             if (was_online && !s_online) {
                 ESP_LOGW(TAG, "OFFLINE (%u polls unanswered) — degrading", miss);
+                events_push(AEVT_RADAR_OFFLINE, 0, 0);
                 xSemaphoreTake(s_lock, portMAX_DELAY);
                 s_target.valid = false;
                 s_target.state = RADAR_TGT_NONE;
@@ -303,6 +324,7 @@ static void radar_task(void *arg)
                 xSemaphoreGive(s_lock);
             } else if (!was_online && s_online) {
                 ESP_LOGI(TAG, "back ONLINE");
+                events_push(AEVT_RADAR_ONLINE, 0, 0);
             }
             c_miss = miss;
         } else {
@@ -312,6 +334,88 @@ static void radar_task(void *arg)
         if (now - last_stats >= 5000 * 1000LL) {
             radar_target_t t;
             radar_get_target(&t);
+
+            /* Long-stillness care alarm (US-009). Alarm: target present
+             * with no sustained motion for still_min. Activity (resets
+             * timer / clears alarm): sustained MOTION state (2+ ticks,
+             * any range — the aggregated target reports hands during
+             * voluntary movement, so range attribution is unreliable),
+             * speech (confident DOA), torso position change (breath
+             * anchor shift >15 cm), or the person leaving.
+             *
+             * Known limitation: in a multi-reflector scene (desk with
+             * phantom/hand motion source) the alarm effectively stays
+             * off — correct, since that scene is continuously "moving".
+             * The care scenario (chair/bed, single person) is the target.
+             * Disabled when still_min == 0 (default). */
+            static int64_t last_motion_us = -1;
+            static int64_t target_gone_us = -1;
+            static uint8_t motion_votes = 0;
+            static bool still_fired = false;
+            static int16_t breath_anchor_cm = -1;
+            if (last_motion_us < 0) last_motion_us = now;   /* boot */
+
+#define STILL_RECOVER(why) do {                                        \
+        still_fired = false;                                           \
+        last_motion_us = now;    /* restart clock on ANY recovery */   \
+        events_push(AEVT_STILL_RECOVER, (int16_t)t.azimuth_deg, 0);    \
+        ESP_LOGI(TAG, "still alarm cleared (%s)", why);                \
+    } while (0)
+
+            int16_t range_cm = (int16_t)(t.range_mm / 10);
+            bool consumed_sound = false;
+            if (s_sound_activity) {           /* speech beats everything */
+                s_sound_activity = false;
+                consumed_sound = true;
+                if (still_fired) STILL_RECOVER("speech");
+                else last_motion_us = now;
+            }
+
+            if (t.valid) {
+                target_gone_us = -1;
+                if (t.state == RADAR_TGT_BREATH) {
+                    if (breath_anchor_cm < 0) {
+                        breath_anchor_cm = range_cm;
+                    } else {
+                        if (still_fired &&
+                            (range_cm > breath_anchor_cm + 15 ||
+                             range_cm < breath_anchor_cm - 15)) {
+                            STILL_RECOVER("position change");
+                        }
+                        /* slow anchor follow for breathing wander */
+                        breath_anchor_cm =
+                            (int16_t)((breath_anchor_cm * 7 + range_cm * 3) / 10);
+                    }
+                }
+                if (t.state == RADAR_TGT_MOTION) {
+                    if (motion_votes < 5) motion_votes++;
+                } else if (motion_votes) {
+                    motion_votes--;
+                }
+                if (motion_votes >= 2) {
+                    last_motion_us = now;
+                    if (still_fired) STILL_RECOVER("motion");
+                }
+            } else {
+                if (target_gone_us < 0) target_gone_us = now;
+                if (now - target_gone_us > 10 * 1000000LL) {
+                    if (still_fired) STILL_RECOVER("left");
+                    breath_anchor_cm = -1;
+                }
+            }
+
+            uint16_t still_min = mode_manager_get_still_min();
+            if (still_min > 0 && t.valid && !still_fired && !consumed_sound &&
+                now - last_motion_us >= (int64_t)still_min * 60 * 1000000LL) {
+                still_fired = true;
+                events_push(AEVT_STILL_ALARM, (int16_t)(t.range_mm / 10),
+                            (int16_t)t.azimuth_deg);
+                ESP_LOGW(TAG, "STILL ALARM: no movement for %u min "
+                         "(range=%ucm az=%.0f°)", still_min,
+                         t.range_mm / 10, t.azimuth_deg);
+            }
+#undef STILL_RECOVER
+
             ESP_LOGI(TAG, "[5s] online=%d tgt=%d(%s) range=%umm angle=%+d° "
                      "filt=%+d° az=%.0f° conf=%u/%u rx=%uB r30=%u miss=%u bad_ck=%u stray=%u",
                      s_online, t.valid, state_name(t.state),

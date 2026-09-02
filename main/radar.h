@@ -49,3 +49,7 @@ bool radar_is_online(void);
 /* Snapshot of the current primary target. Returns false when no target is
  * detected; *out is still filled with state=NONE fields in that case. */
 bool radar_get_target(radar_target_t *out);
+
+/* Notify the radar module that speech/DOA activity was observed (used by
+ * the stillness care alarm as a recovery trigger). */
+void radar_notify_sound(void);

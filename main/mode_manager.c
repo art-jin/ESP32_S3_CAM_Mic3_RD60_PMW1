@@ -17,6 +17,7 @@ static int     s_timeout_s = COMMAND_DEFAULT_TIMEOUT_S;
 
 static track_submode_t s_submode = TRACK_AUDIO_ONLY;
 static oor_policy_t    s_oor_policy = OOR_HOLD;
+static uint16_t        s_still_min = 0;   /* 0 = still-alarm disabled */
 
 static const char *submode_name(track_submode_t s)
 {
@@ -60,6 +61,9 @@ static void cfg_load(void)
         s_submode = (track_submode_t)v;
     if (nvs_get_u8(h, "oorpol", &v) == ESP_OK && v <= OOR_SCAN)
         s_oor_policy = (oor_policy_t)v;
+    uint16_t m;
+    if (nvs_get_u16(h, "stillmin", &m) == ESP_OK && m <= 1440)
+        s_still_min = m;
     nvs_close(h);
 }
 
@@ -149,4 +153,24 @@ void mode_manager_set_oor_policy(oor_policy_t policy)
 oor_policy_t mode_manager_get_oor_policy(void)
 {
     return s_oor_policy;
+}
+
+void mode_manager_set_still_min(uint16_t minutes)
+{
+    if (minutes > 1440) minutes = 1440;   /* cap at 24 h */
+    if (minutes == s_still_min) return;
+    ESP_LOGI(TAG, "still alarm: %u min (%s)", minutes,
+             minutes ? "enabled" : "disabled");
+    s_still_min = minutes;
+    nvs_handle_t h;
+    if (nvs_open("mmode", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u16(h, "stillmin", minutes);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+uint16_t mode_manager_get_still_min(void)
+{
+    return s_still_min;
 }

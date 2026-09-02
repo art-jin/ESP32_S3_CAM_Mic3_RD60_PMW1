@@ -51,6 +51,10 @@ const char *evlog_type_str(uint8_t type)
         case EV_MODE_CHG:    return "MODE_CHG";
         case EV_SHAKE_START: return "SHAKE_START";
         case EV_SHAKE_END:   return "SHAKE_END";
+        case EV_RADAR_UP:    return "RADAR_UP";
+        case EV_RADAR_DOWN:  return "RADAR_DOWN";
+        case EV_STILL:       return "STILL";
+        case EV_OOR:         return "OOR";
         default:             return "?";
     }
 }

@@ -10,6 +10,7 @@
 #include "fusion.h"
 #include "mode_manager.h"
 #include "radar.h"
+#include "events.h"
 
 static const char *TAG = "tracker";
 
@@ -200,6 +201,7 @@ void tracker_radar_update(void)
     if (fabsf(target) > 90.0f) {
         if (!s_oor_active) {
             s_oor_active = true;
+            events_push(AEVT_OOR, (int16_t)target, (int16_t)pol);
             ESP_LOGI(TAG, "OOR[%s]: radar target=%.1f° unreachable",
                      pol == OOR_HOLD ? "hold" :
                      pol == OOR_CLAMP || pol == OOR_SCAN ? "clamp" : "home",
@@ -497,6 +499,7 @@ void tracker_update(const doa_result_t *doa)
         if (in_oor) {
             if (!s_oor_active) {
                 s_oor_active = true;
+                events_push(AEVT_OOR, (int16_t)target, (int16_t)pol);
                 ESP_LOGI(TAG, "OOR[%s]: target=%.1f° unreachable",
                          pol == OOR_HOLD ? "hold" :
                          pol == OOR_CLAMP ? "clamp" : "home", target);
@@ -540,7 +543,7 @@ void tracker_update(const doa_result_t *doa)
 
     /* Sound↔radar association metadata (Phase 2): evaluated on every
      * accepted DOA, never gates the motion itself. */
-    fusion_evaluate(doa->azimuth_deg);
+    fusion_evaluate(doa->azimuth_deg, doa->confidence);
     if (!s_have_target) {
         evlog_record(EV_DOA_FIRST, (uint8_t)doa->stable_sextant,
                      (int16_t)doa->azimuth_deg);

@@ -16,11 +16,24 @@
 #include "freertos/semphr.h"
 
 #include "fusion.h"
+#include "events.h"
 
 static const char *TAG = "fusion";
 
 static SemaphoreHandle_t s_lock;
 static fusion_result_t s_last;
+
+/* Association-state hysteresis: DOA azimuth jitters ±15° in speech and
+ * crosses the 20° gate every few hundred ms, which otherwise floods the
+ * 32-slot event ring (observed 31 flips in 80 s). A flip is committed —
+ * and pushed as an event — only after the new state persists 1 s, and
+ * assoc/unassoc pushes are rate-limited to one per 10 s. */
+#define FUSION_FLIP_HOLD_US  1000000LL
+#define FUSION_EVT_MIN_US    10000000LL
+static bool     s_flip_pending;
+static bool     s_flip_to;
+static int64_t  s_flip_since_us;
+static int64_t  s_last_assoc_evt_us;
 
 static float wrap180(float d)
 {
@@ -36,8 +49,16 @@ void fusion_init(void)
     ESP_LOGI(TAG, "init: gate=%.0f°", FUSION_ASSOC_GATE_DEG);
 }
 
-void fusion_evaluate(float doa_az_deg)
+void fusion_evaluate(float doa_az_deg, float confidence)
 {
+    /* Speech = substantial activity for the care alarm (US-009). Gate on
+     * confidence: ambient noise (fans, street) passes the tracker's
+     * 0.35 + 2-of-3 filters but not 0.5 — noise DOAs at az 12-75° were
+     * observed resetting the stillness timer every few seconds. */
+    if (confidence >= 0.5f) {
+        radar_notify_sound();
+    }
+
     radar_target_t t;
     bool has_radar = radar_get_target(&t);
     bool online = radar_is_online();
@@ -59,6 +80,29 @@ void fusion_evaluate(float doa_az_deg)
     }
 
     bool was_assoc = false;
+    int64_t now_us = esp_timer_get_time();
+
+    /* Hysteresis commit: the reported association only flips (and logs /
+     * pushes an event) when the desired state has held for 1 s and the
+     * rate-limit window allows. Until then keep the previous state. */
+    if (r.associated != s_last.associated) {
+        if (!s_flip_pending || s_flip_to != r.associated) {
+            s_flip_pending = true;
+            s_flip_to = r.associated;
+            s_flip_since_us = now_us;
+        }
+        if (now_us - s_flip_since_us >= FUSION_FLIP_HOLD_US &&
+            now_us - s_last_assoc_evt_us >= FUSION_EVT_MIN_US) {
+            r.associated = s_flip_to;
+            s_flip_pending = false;
+            s_last_assoc_evt_us = now_us;
+        } else {
+            r.associated = s_last.associated;   /* hold previous state */
+        }
+    } else {
+        s_flip_pending = false;
+    }
+
     xSemaphoreTake(s_lock, portMAX_DELAY);
     was_assoc = s_last.associated;
     s_last = r;
@@ -66,17 +110,23 @@ void fusion_evaluate(float doa_az_deg)
 
     if (r.associated != was_assoc) {
         if (r.associated) {
+            events_push(AEVT_SOUND_ASSOC, (int16_t)r.doa_az_deg,
+                        (int16_t)(r.range_mm / 10));
             ESP_LOGI(TAG, "ASSOC doa=%.0f° radar=%.0f° diff=%.0f° range=%umm (%s)",
                      r.doa_az_deg, r.radar_az_deg, r.angle_diff_deg,
                      r.range_mm,
                      t.state == RADAR_TGT_MOTION ? "运动" :
                      t.state == RADAR_TGT_BREATH ? "呼吸" : "目标");
-        } else if (r.evaluated && online) {
-            ESP_LOGI(TAG, "UNASSOC doa=%.0f° (radar az=%.0f° diff=%.0f° > gate)",
-                     r.doa_az_deg, r.radar_az_deg, r.angle_diff_deg);
         } else {
-            ESP_LOGI(TAG, "UNASSOC doa=%.0f° (radar %s)", r.doa_az_deg,
-                     online ? "no target" : "offline");
+            events_push(AEVT_SOUND_UNASSOC, (int16_t)r.doa_az_deg,
+                        (int16_t)r.angle_diff_deg);
+            if (r.evaluated && online) {
+                ESP_LOGI(TAG, "UNASSOC doa=%.0f° (radar az=%.0f° diff=%.0f° > gate)",
+                         r.doa_az_deg, r.radar_az_deg, r.angle_diff_deg);
+            } else {
+                ESP_LOGI(TAG, "UNASSOC doa=%.0f° (radar %s)", r.doa_az_deg,
+                         online ? "no target" : "offline");
+            }
         }
     }
 }
