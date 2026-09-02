@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "servo.h"
 #include "evlog.h"
+#include "fusion.h"
 
 static const char *TAG = "tracker";
 
@@ -412,7 +413,9 @@ void tracker_update(const doa_result_t *doa)
         if (diff < -max_delta) target = s_last_target_deg - max_delta;
     }
 
-    /* Command the servo. */
+    /* Command the servo. Sound↔radar association metadata (Phase 2):
+     * evaluated on every accepted DOA, never gates the motion itself. */
+    fusion_evaluate(doa->azimuth_deg);
     if (!s_have_target) {
         evlog_record(EV_DOA_FIRST, (uint8_t)doa->stable_sextant,
                      (int16_t)doa->azimuth_deg);

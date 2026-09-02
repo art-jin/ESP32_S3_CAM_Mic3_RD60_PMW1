@@ -18,6 +18,7 @@
 #include "status.h"
 #include "evlog.h"
 #include "radar.h"
+#include "fusion.h"
 #include "radar_probe.h"
 
 static const char *TAG = "main";
@@ -251,6 +252,7 @@ void app_main(void)
     /* Radar — enhancement, not a dependency: degrades to audio-only on
      * link failure (see radar.c). Phase 1: state only, no servo action. */
     radar_init();
+    fusion_init();   /* sound↔radar association metadata (Phase 2) */
 
     /* WiFi — non-blocking, connects in background. REST API starts
      * automatically once IP is obtained. Track mode works without WiFi. */
