@@ -208,15 +208,37 @@ GET /api/status?device_id=XXXXXX
 ```json
 {
   "ok": true,
-  "mode": "track",              // "track" 或 "command"
-  "servo": 30.0,               // 当前舵机角度（度，-100 到 +100）
-  "moving": false,             // 舵机是否正在运动
-  "azimuth": 210,              // 最新 DOA 方位角（0-360）
-  "sect": "7 o'clock",         // 稳定扇区
-  "conf": 0.55,                // DOA 置信度（0-1）
-  "wifi": "connected",         // WiFi 状态
-  "ip": "192.168.1.105",      // IP 地址
-  "host": "esp32-mic-24f8"    // mDNS 主机名
+  "mode": "track",
+  "submode": "audio_only",
+  "oor": "hold",
+  "still_min": 0,
+  "servo": 30.0,
+  "moving": false,
+  "azimuth": 210,
+  "sect": "7 o'clock",
+  "conf": 0.55,
+  "radar": {
+    "online": true,
+    "target": {
+      "valid": true,
+      "state": "motion",
+      "range_mm": 682,
+      "azimuth": 187,
+      "rb_conf": 16,
+      "ang_conf": 16
+    }
+  },
+  "fusion": {
+    "evaluated": true,
+    "associated": true,
+    "doa_az": 171,
+    "radar_az": 187,
+    "diff": 16,
+    "range_mm": 704
+  },
+  "wifi": "connected",
+  "ip": "192.168.1.105",
+  "host": "esp32-mic-24f8"
 }
 ```
 
@@ -224,21 +246,79 @@ GET /api/status?device_id=XXXXXX
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `mode` | string | 当前工作模式 |
-| `servo` | float | 舵机当前角度。0° = M3 指向 6 点钟；正值 = 顺时针（向 7-10oc）；负值 = 逆时针（向 5-2oc） |
+| `mode` | string | 当前工作模式（track / command） |
+| `submode` | string | track 子模式：`audio_only`（默认）/ `fusion` / `radar_follow` |
+| `oor` | string | 超范围策略：`hold`（默认）/ `clamp` / `home` / `scan` |
+| `still_min` | int | 长静止看护告警阈值（分钟，0=关闭，默认 0，上限 1440） |
+| `servo` | float | 舵机当前角度。0° = 指向 6 点钟；±90° = 3点/9点软件限位 |
 | `moving` | bool | 舵机是否在 soft-start 过渡中 |
 | `azimuth` | float | DOA 测量的声源方位。0° = 12oc，90° = 3oc，180° = 6oc，270° = 9oc |
 | `sect` | string | 3 帧一致后的稳定扇区（DOA hysteresis） |
 | `conf` | float | DOA 置信度。< 0.35 = 噪声，0.35-0.55 = 可用，> 0.55 = 高质量 |
+| `radar.online` | bool | 雷达链路状态（连续 3 次轮询无回复即 false，自动降级纯声音跟踪） |
+| `radar.target.valid` | bool | 是否有目标（无目标签名 det_result=0/range=0/conf=0） |
+| `radar.target.state` | string | `motion`（运动）/ `breath`（呼吸/微动，静止人体）/ approach / depart / none |
+| `radar.target.range_mm` | int | 目标距离（毫米）。rb_conf ≥ 12 时可信 |
+| `radar.target.azimuth` | float | 目标钟点方位角（12点=0° 顺时针），由雷达角映射 az=187+2.1×angle |
+| `radar.target.rb_conf` / `ang_conf` | int | 距离/角度置信度 0-16；<12 / <8 时对应值可能不准（协议规定） |
+| `fusion.evaluated` | bool | 是否已发生过 DOA 关联评估 |
+| `fusion.associated` | bool | 最近一次评估：声源是否与雷达目标关联（门限 20°，带 1s 去抖） |
+| `fusion.doa_az` / `radar_az` / `diff` | float | 声源方位 / 目标方位 / 差值（度） |
+| `fusion.range_mm` | int | 关联目标的距离 |
 | `wifi` | string | "connected" 或 "disconnected" |
 
 **注意**：command 模式下 `azimuth` 仍然返回实时值（DOA 算法持续运行），外部系统可利用此特性做"固定指向 + 监测声源"。
 
 ---
 
+### GET /api/events
+
+场景事件队列（RAM 32 槽环形缓冲，按序号增量拉取）。用于看护场景的轮询监控。
+
+**请求**：
+```
+GET /api/events?device_id=XXXXXX            # 全部（最多 32 条）
+GET /api/events?device_id=XXXXXX&since=42   # 仅 seq > 42 的增量
+```
+
+**响应**（200）：
+```json
+{
+  "ok": true,
+  "next": 8,
+  "events": [
+    {"seq": 5, "ms": 60804, "type": "RADAR_OFFLINE", "v1": 0, "v2": 0},
+    {"seq": 6, "ms": 64096, "type": "SOUND_UNASSOC", "v1": 177, "v2": 0},
+    {"seq": 7, "ms": 72383, "type": "TARGET_ENTER",  "v1": 184, "v2": 52},
+    {"seq": 8, "ms": 72384, "type": "RADAR_ONLINE",  "v1": 0, "v2": 0}
+  ]
+}
+```
+
+**事件类型与载荷**：
+
+| type | v1 | v2 | 含义 |
+|---|---|---|---|
+| `TARGET_ENTER` / `TARGET_LEAVE` | 方位角° | 进入:距离cm | 雷达目标出现/消失 |
+| `SOUND_ASSOC` / `SOUND_UNASSOC` | DOA方位° | 距离cm / 差值° | 声源关联成功/失败（状态翻转 1s 去抖 + 10s 限频） |
+| `OOR` | 目标舵机角° | 策略 id | 目标超出 ±90°（0=hold 1=clamp 2=home 3=scan） |
+| `RADAR_OFFLINE` / `RADAR_ONLINE` | 0 | 0 | 雷达链路断/恢复（离线自动降级纯声音跟踪） |
+| `STILL_ALARM` | 距离cm | 方位° | 长静止看护告警（仍_min>0 时启用） |
+| `STILL_RECOVER` | 方位° | 0 | 告警解除（持续运动/说话/位置变化/离开） |
+
+`ms` 为设备开机毫秒数。队列仅存最近 32 条；高价值事件（离线/告警/OOR）同时镜像写入 NVS evlog（重启留存，经 /api/logs 读取）。
+
+---
+
+### GET /api/logs
+
+NVS 事件日志（evlog，32 槽，跨重启留存）。记录舵机命令、模式切换、雷达离线、告警等取证事件，含开机计数与重启原因。响应格式见设备 /api/logs 实测；用于事后诊断而非实时监控（实时用 /api/events）。
+
+---
+
 ### POST /api/mode
 
-切换工作模式。
+切换工作模式 / 跟踪子模式 / 超范围策略 / 静止告警阈值。字段相互独立，至少提供一个。
 
 **请求**：
 ```
@@ -248,28 +328,34 @@ Content-Type: application/json
 {"mode": "command"}
 ```
 
-**可选参数**：
+**可选字段**：
 ```json
-{"mode": "command", "timeout": 0}    // timeout=0 表示不自动切回 track
-{"mode": "command", "timeout": 600}   // 10 分钟后自动切回 track
+{"mode": "command", "timeout": 0}          // timeout=0 表示不自动切回 track
+{"submode": "fusion"}                       // audio_only | fusion | radar_follow（track 子模式）
+{"oor": "clamp"}                            // hold | clamp | home | scan（超范围策略）
+{"still_min": 30}                           // 长静止告警阈值（分钟，0=关闭，上限 1440）
 ```
 
 **响应**（200）：
 ```json
-{"ok": true, "mode": "command"}
+{"ok": true, "mode": "track", "submode": "audio_only", "oor": "hold", "still_min": 0}
 ```
 
 **错误**：
 
 | HTTP Code | error | 条件 |
 |---|---|---|
-| 400 | bad_request | body 缺少 `mode` 字段或值不合法 |
+| 400 | bad_request | mode/submode/oor/still_min 任一字段值不合法，或全部缺失 |
 | 401 | unauthorized | device_id 缺失或错误 |
 
 **行为细节**：
 - `track → command`：立即停止 tracker，舵机保持当前位置
 - `command → track`：重置 tracker 状态（EMA、agreement buffer），从当前角度恢复跟踪
 - 默认超时 300 秒（5 分钟），`timeout` 参数可覆盖
+- **submode**（仅 track 模式生效）：`audio_only` 声音驱动（默认）；`fusion` 声音优先、静默 3 秒后跟随雷达目标；`radar_follow` 仅雷达驱动（忽略纯声音）。切换时重置 tracker 状态
+- **oor**：目标方位超出舵机 ±90°（9~3点）时的行为——`hold` 原地保持+事件（默认）；`clamp` 转到最近边界；`home` 回中；`scan` 在边界小幅摆动（v2.5 行为）。全部产生 OOR 事件
+- **still_min**：雷达目标持续无活动超过阈值 → STILL_ALARM 事件（一次）；持续运动/说话（DOA conf≥0.5）/位置漂移>15cm/离开 → STILL_RECOVER。默认 0=关闭
+- submode / oor / still_min 均写入 NVS，重启保持
 
 ---
 
