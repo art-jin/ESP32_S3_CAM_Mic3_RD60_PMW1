@@ -17,6 +17,7 @@
 #include "mode_manager.h"
 #include "status.h"
 #include "evlog.h"
+#include "radar_probe.h"
 
 static const char *TAG = "main";
 
@@ -212,6 +213,14 @@ static void mic_task(void *arg)
 
 void app_main(void)
 {
+#if RADAR_PROBE_MODE
+    /* Phase 0: replace normal startup with the radar UART sniffer so the
+     * log contains only radar traffic. Flip RADAR_PROBE_MODE to 0 to
+     * restore the DOA/tracker/REST firmware. */
+    radar_probe_start();
+    return;
+#endif
+
     /* NVS — required by WiFi driver. */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

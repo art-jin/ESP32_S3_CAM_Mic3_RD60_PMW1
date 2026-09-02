@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ESP32-S3-SuperMini + 3DMIC-291 three-mic array + **MS60-1211S80M 60GHz mmWave radar** + 1-channel PWM servo. Goal: combine the existing acoustic sound-source localization (DOA + servo tracking) with the radar's multi-target motion sensing — 声源定位与多目标运动状态探测.
 
-**Current status: base code imported (2026-09-02), radar development not yet started.** The mic-array + servo + REST-API stack was copied from the base project's working tree (see below) into `main/`. Read `ArthurReadMe.md` (the requirements doc, in Chinese) first, then `CLAUDE_BASE.md` for the inherited stack. Radar fusion is the new work.
+**Current status: base code imported (2026-09-02), radar development not yet started.** The mic-array + servo + REST-API stack was copied from the base project's working tree (see below) into `main/`. Read `ArthurReadMe.md` (the requirements doc, in Chinese) first, then `CLAUDE_BASE.md` for the inherited stack. Radar fusion is the new work. The reviewed requirements/test plan/dev plan for the radar work live in **`tasks/prd-radar-audio-fusion.md`** — that file is the source of truth for scope, coverage zones (radar ±60°, servo ±90°, mic 360°), tracking sub-modes, and out-of-range policy.
 
 ## Base project (source of existing code)
 
@@ -50,13 +50,13 @@ Both PDFs are text-based Chinese; extract with `pdftotext` (available on this ma
 
 ### Protocol essentials (from 雷达通信协议.pdf)
 
-- UART: **921600 bps 8N1 default** (switchable via command 3.1.11 波特率切换); IIC also available (§4.2)
-- Host→radar frame: `Head 0x58` + payload (CMD Group 3 bits + CMD 5 bits, Parameter Length, params) + `Check Code` = sum of Head + all payload bytes (no XOR, plain addition)
-- Key command groups: 3.1 basic (reset, version, save settings), 3.2 radar config (motion/micro-motion/breath detection distances & sensitivities), 3.4 **active reporting** (radar pushes frames unprompted)
-- Active report TYPE=0 "full detection info" struct: `is_detected`, `det_result`, `range_val` (u16, mm), `angle_val` (s16, 1° units), `velo_val` (s16), `rb_conf` (u8, 0–16; **range_val may be wrong when < 12**)
+- UART: **115200 8N1 measured** (2026-09-02 Phase 0 — the AT6010 doc's 921600 default does NOT apply to this module's MoreSense firmware); IIC also available (§4.2)
+- Host→radar frame: `Head 0x58` + payload (CMD Group 3 bits + CMD 5 bits, Parameter Length, params) + `Check Code` = **u16 little-endian sum** of all preceding bytes
+- Key command groups: 3.1 basic (reset, version, save settings), 3.2 radar config (motion/micro-motion/breath detection distances & sensitivities), 3.4 active reporting — **NOT functional on this firmware** (never streams; poll command 3.2.6/0x30 instead)
+- Active report TYPE=0 struct = same `fmcw_det_info_t` returned by the 0x30 poll: `is_detected`, `det_result` (0x04 运动 / 0x10 呼吸 / 0 = no target), `range_val` (u16, mm), `angle_val` (s16, 1° units), `velo_val` (s16, always 0), `rb_conf` (u8, 0–16; **range_val may be wrong when < 12**)
 - Report types also exist for altimeter, occupancy, motion-presence, breath/heart-rate, and zone detection (3.4.1–3.4.6)
 
-The radar's per-target range+angle output is the intended fusion input for the mic-array DOA (radar gives coarse azimuth + range + motion state for multiple targets; the 3-mic array gives precise azimuth for the sounding source).
+The radar's range+angle output is the intended fusion input for the mic-array DOA (radar gives coarse azimuth + range + motion state for ONE aggregated target via 5 Hz polling of command 0x30; the 3-mic array gives precise azimuth for the sounding source). Phase 0 measured findings live in `tasks/radar-protocol-notes.md`; the radar probe firmware (compile-time `RADAR_PROBE_MODE` in `main/radar_probe.c`) replaces normal startup for protocol sniffing.
 
 ## Toolchain & build (inherited from base project)
 
