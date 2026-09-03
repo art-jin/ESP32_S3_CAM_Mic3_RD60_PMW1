@@ -17,6 +17,8 @@
 typedef struct {
     bool evaluated;           /* at least one DOA event since boot */
     bool associated;
+    bool assoc_instant;       /* pre-hysteresis association of the last DOA
+                               * (used by the tracker's association gate) */
     bool radar_online;
     float doa_az_deg;         /* tracker-accepted DOA azimuth */
     float radar_az_deg;       /* radar target azimuth at that moment */

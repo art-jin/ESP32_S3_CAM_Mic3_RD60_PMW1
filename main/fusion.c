@@ -81,6 +81,7 @@ void fusion_evaluate(float doa_az_deg, float confidence)
 
     bool was_assoc = false;
     int64_t now_us = esp_timer_get_time();
+    r.assoc_instant = r.associated;   /* raw verdict, before hysteresis */
 
     /* Hysteresis commit: the reported association only flips (and logs /
      * pushes an event) when the desired state has held for 1 s and the

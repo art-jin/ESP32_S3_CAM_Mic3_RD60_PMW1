@@ -542,8 +542,20 @@ void tracker_update(const doa_result_t *doa)
     }
 
     /* Sound↔radar association metadata (Phase 2): evaluated on every
-     * accepted DOA, never gates the motion itself. */
+     * accepted DOA. The optional association gate (robot-speaker
+     * immunity) suppresses servo commands for sound that does NOT
+     * coincide with the radar target — e.g. a robot speaker at 3oc —
+     * while the radar is online; offline it bypasses so sound-only
+     * tracking keeps working. */
     fusion_evaluate(doa->azimuth_deg, doa->confidence);
+    if (mode_manager_get_assoc_gate() && radar_is_online()) {
+        fusion_result_t fr;
+        fusion_get_last(&fr);
+        if (fr.evaluated && !fr.assoc_instant) {
+            s_mode = TRACKER_MODE_SUPPRESSED;
+            return;
+        }
+    }
     if (!s_have_target) {
         evlog_record(EV_DOA_FIRST, (uint8_t)doa->stable_sextant,
                      (int16_t)doa->azimuth_deg);

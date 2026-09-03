@@ -63,6 +63,14 @@ oor_policy_t mode_manager_get_oor_policy(void);
 void mode_manager_set_still_min(uint16_t minutes);
 uint16_t mode_manager_get_still_min(void);
 
+/* Sound association gate (robot-speaker immunity): when enabled, sound
+ * only drives the servo when its DOA coincides with the radar target
+ * (the person). Non-coincident sources (e.g. a robot speaker at 3oc)
+ * are logged as events but never move the servo. Bypassed while the
+ * radar is offline. Persisted in NVS, default off. */
+void mode_manager_set_assoc_gate(bool on);
+bool mode_manager_get_assoc_gate(void);
+
 /* Called from mic_task at 20Hz. Checks command-mode timeout. */
 void mode_manager_tick(void);
 

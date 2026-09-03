@@ -469,13 +469,11 @@ static bool wait_reply(uint32_t timeout_ms)
     return false;
 }
 
-static void radar_task(void *arg)
+/* Full bring-up: version handshake (+baud self-heal), sensing on,
+ * distance gates, save, system reset, config readback. Idempotent —
+ * also used by the offline auto-recovery loop. */
+static void bring_up(bool save)
 {
-    (void)arg;
-    int64_t last_poll = 0, last_stats = 0;
-    uint32_t miss = 0;
-
-    /* Bring-up: confirm link with version query, then force sensing on. */
     for (int i = 0; i < RAD_INIT_RETRIES && !s_ver_ok; i++) {
         uart_write_bytes(RAD_UART_NUM, VER_REQ, sizeof(VER_REQ));
         wait_reply(500);
@@ -517,8 +515,10 @@ static void radar_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(200));
     uart_write_bytes(RAD_UART_NUM, MO_MIN, sizeof(MO_MIN));
     vTaskDelay(pdMS_TO_TICKS(200));
-    uart_write_bytes(RAD_UART_NUM, SAVE, sizeof(SAVE));
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    if (save) {
+        uart_write_bytes(RAD_UART_NUM, SAVE, sizeof(SAVE));
+        vTaskDelay(pdMS_TO_TICKS(1200));
+    }
     uart_write_bytes(RAD_UART_NUM, SYSRST, sizeof(SYSRST));
     ESP_LOGI(TAG, "radar reset to apply distance config (mot>=50cm bhr>=80cm)");
     vTaskDelay(pdMS_TO_TICKS(4000));
@@ -528,6 +528,15 @@ static void radar_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(200));
     service_link();
     s_online = true;
+}
+
+static void radar_task(void *arg)
+{
+    (void)arg;
+    int64_t last_poll = 0, last_stats = 0;
+    uint32_t miss = 0;
+
+    bring_up(true);
 
     while (1) {
         /* Execute a posted configuration request (UART stays in this
@@ -572,6 +581,27 @@ static void radar_task(void *arg)
             } else if (!was_online && s_online) {
                 ESP_LOGI(TAG, "back ONLINE");
                 events_push(AEVT_RADAR_ONLINE, 0, 0);
+            }
+
+            /* Auto-recovery: this module has a recurring hung state
+             * (silent at every baud; seen at boot twice). Re-running the
+             * full bring-up — SYSRST included — has revived it every
+             * time. First retry after 15 s offline, then every 30 s. */
+            static int64_t offline_since_us = -1;
+            static int64_t last_recover_us = -60000000;
+            if (!s_online) {
+                if (offline_since_us < 0) offline_since_us = now;
+                if (now - offline_since_us > 15000000LL &&
+                    now - last_recover_us > 30000000LL) {
+                    ESP_LOGW(TAG, "offline %.0fs — running auto-recovery",
+                             (float)((now - offline_since_us) / 1000000));
+                    last_recover_us = now;
+                    s_ver_ok = false;
+                    bring_up(true);
+                    offline_since_us = -1;
+                }
+            } else {
+                offline_since_us = -1;
             }
             c_miss = miss;
         } else {

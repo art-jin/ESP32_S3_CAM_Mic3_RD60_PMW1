@@ -95,6 +95,10 @@ main{flex:1;display:grid;grid-template-columns:1fr 360px;gap:12px;padding:12px;m
       <div class="row"><label class="small">超范围</label>
         <div class="seg" id="seg_oor"><button data-v="hold">保持</button><button data-v="clamp">边界</button><button data-v="home">回中</button><button data-v="scan">扫描</button></div>
       </div>
+      <div class="row"><label class="small">声音关联门</label>
+        <div class="seg" id="seg_gate"><button data-v="0" class="act">关</button><button data-v="1">开</button></div>
+        <span class="small">开=只跟踪与雷达目标吻合的声音（挡机器人/音响）</span>
+      </div>
       <div class="row"><label class="small">长静止告警</label>
         <input type="number" id="still_min" min="0" max="1440" placeholder="分钟">
         <span class="small">分钟（0=关）</span>
@@ -237,6 +241,7 @@ const stName={motion:"运动",breath:"呼吸",approach:"靠近",depart:"远离",
 function setSeg(id,v){document.querySelectorAll("#"+id+" button").forEach(b=>b.classList.toggle("act",b.dataset.v===v));}
 function render(s){
   setSeg("seg_mode",s.mode);setSeg("seg_sub",s.submode);setSeg("seg_oor",s.oor);
+  setSeg("seg_gate",s.assoc_gate?"1":"0");
   $("cmdbox").classList.toggle("hidden",s.mode!=="command");
   $("v_az").textContent=s.azimuth!=null?s.azimuth.toFixed(0)+"°":"--";
   $("v_conf").textContent=s.conf!=null?s.conf.toFixed(2):"--";
@@ -276,6 +281,10 @@ function segClick(id,field){
   });
 }
 segClick("seg_mode","mode");segClick("seg_sub","submode");segClick("seg_oor","oor");
+$("seg_gate").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  api("/api/mode",{assoc_gate:parseInt(b.dataset.v)}).then(j=>{if(j){toast("✓ 声音关联门已"+(parseInt(b.dataset.v)?"开":"关"));pollStatus();}});
+});
 $("seg_scale").addEventListener("click",e=>{
   const b=e.target.closest("button");if(!b)return;
   scaleMode=b.dataset.v;

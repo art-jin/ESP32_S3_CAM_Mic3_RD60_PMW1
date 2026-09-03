@@ -204,6 +204,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"submode\":\"%s\","
         "\"oor\":\"%s\","
         "\"still_min\":%u,"
+        "\"assoc_gate\":%s,"
         "\"servo\":%.1f,"
         "\"moving\":%s,"
         "\"azimuth\":%.0f,"
@@ -221,6 +222,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         subnames[mode_manager_get_submode()],
         oornames[mode_manager_get_oor_policy()],
         (unsigned)mode_manager_get_still_min(),
+        mode_manager_get_assoc_gate() ? "true" : "false",
         st.servo_angle,
         st.servo_moving ? "true" : "false",
         st.azimuth,
@@ -381,10 +383,12 @@ static esp_err_t handler_mode(httpd_req_t *req)
     bool has_oor  = json_get_str(body, "oor", oor_str, sizeof(oor_str));
     int still_probe = -1;
     bool has_still = json_get_int(body, "still_min", &still_probe);
+    int gate_probe = -1;
+    bool has_gate = json_get_int(body, "assoc_gate", &gate_probe);
 
-    if (!has_mode && !has_sub && !has_oor && !has_still) {
+    if (!has_mode && !has_sub && !has_oor && !has_still && !has_gate) {
         return send_error(req, 400, "bad_request",
-                          "need at least one of 'mode'/'submode'/'oor'/'still_min'");
+                          "need at least one of 'mode'/'submode'/'oor'/'still_min'/'assoc_gate'");
     }
 
     if (has_mode) {
@@ -437,16 +441,26 @@ static esp_err_t handler_mode(httpd_req_t *req)
         mode_manager_set_still_min((uint16_t)still_min);
     }
 
+    int gate = -1;
+    json_get_int(body, "assoc_gate", &gate);
+    if (gate > 1) {
+        return send_error(req, 400, "bad_request", "assoc_gate must be 0 or 1");
+    }
+    if (gate >= 0) {
+        mode_manager_set_assoc_gate(gate != 0);
+    }
+
     static const char *subnames[] = {"audio_only", "fusion", "radar_follow"};
     static const char *oornames[] = {"hold", "clamp", "home", "scan"};
-    char resp[112];
+    char resp[144];
     snprintf(resp, sizeof(resp),
              "{\"ok\":true,\"mode\":\"%s\",\"submode\":\"%s\",\"oor\":\"%s\","
-             "\"still_min\":%u}",
+             "\"still_min\":%u,\"assoc_gate\":%s}",
              mode_manager_get() == MODE_COMMAND ? "command" : "track",
              subnames[mode_manager_get_submode()],
              oornames[mode_manager_get_oor_policy()],
-             (unsigned)mode_manager_get_still_min());
+             (unsigned)mode_manager_get_still_min(),
+             mode_manager_get_assoc_gate() ? "true" : "false");
     return send_json_ok(req, resp);
 }
 

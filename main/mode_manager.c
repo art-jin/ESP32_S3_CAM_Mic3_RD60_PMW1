@@ -18,6 +18,7 @@ static int     s_timeout_s = COMMAND_DEFAULT_TIMEOUT_S;
 static track_submode_t s_submode = TRACK_AUDIO_ONLY;
 static oor_policy_t    s_oor_policy = OOR_HOLD;
 static uint16_t        s_still_min = 0;   /* 0 = still-alarm disabled */
+static bool            s_assoc_gate = false;
 
 static const char *submode_name(track_submode_t s)
 {
@@ -64,6 +65,9 @@ static void cfg_load(void)
     uint16_t m;
     if (nvs_get_u16(h, "stillmin", &m) == ESP_OK && m <= 1440)
         s_still_min = m;
+    uint8_t g;
+    if (nvs_get_u8(h, "assocgate", &g) == ESP_OK && g <= 1)
+        s_assoc_gate = g != 0;
     nvs_close(h);
 }
 
@@ -173,4 +177,18 @@ void mode_manager_set_still_min(uint16_t minutes)
 uint16_t mode_manager_get_still_min(void)
 {
     return s_still_min;
+}
+
+void mode_manager_set_assoc_gate(bool on)
+{
+    if (on == s_assoc_gate) return;
+    ESP_LOGI(TAG, "assoc gate: %s", on ? "ON (sound must coincide with "
+             "radar target)" : "OFF");
+    s_assoc_gate = on;
+    cfg_save("assocgate", on ? 1 : 0);
+}
+
+bool mode_manager_get_assoc_gate(void)
+{
+    return s_assoc_gate;
 }
