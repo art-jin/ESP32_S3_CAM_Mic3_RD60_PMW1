@@ -43,6 +43,10 @@ static const char *TAG = "radar";
 
 static const uint8_t VER_REQ[5]  = {0x58, 0xFE, 0x00, 0x56, 0x01};
 static const uint8_t SENS_Q[5]   = {0x58, 0xD0, 0x00, 0x28, 0x01};  /* 3.2.2 sensing status */
+/* 3.1.11 波特率切换 -> 115200 (u32 LE). The module can revert to its
+ * factory-default 921600 baud (observed after config-flash writes +
+ * overnight power cycle) — the driver self-heals this at bring-up. */
+static const uint8_t BAUD_115200[9] = {0x58, 0x19, 0x04, 0x00, 0xC2, 0x01, 0x00, 0x38, 0x01};
 static const uint8_t SENS_ON[6]  = {0x58, 0xD1, 0x01, 0x01, 0x2B, 0x01};
 static const uint8_t DET_Q[5]    = {0x58, 0x30, 0x00, 0x88, 0x00};
 /* 3.2.16 breath min distance = 80 (cm) — gates the static ~0.6m desk echo
@@ -475,6 +479,35 @@ static void radar_task(void *arg)
     for (int i = 0; i < RAD_INIT_RETRIES && !s_ver_ok; i++) {
         uart_write_bytes(RAD_UART_NUM, VER_REQ, sizeof(VER_REQ));
         wait_reply(500);
+    }
+
+    /* Baud self-heal: if the module sits at its factory 921600 (seen
+     * after config-flash writes), switch it back to 115200 and
+     * re-verify before continuing. */
+    if (!s_ver_ok) {
+        ESP_LOGW(TAG, "no reply at %d — trying 921600 recovery", RAD_BAUD);
+        uart_set_baudrate(RAD_UART_NUM, 921600);
+        uart_flush_input(RAD_UART_NUM);
+        for (int i = 0; i < 3 && !s_ver_ok; i++) {
+            uart_write_bytes(RAD_UART_NUM, BAUD_115200, sizeof(BAUD_115200));
+            vTaskDelay(pdMS_TO_TICKS(300));
+            uart_write_bytes(RAD_UART_NUM, VER_REQ, sizeof(VER_REQ));
+            wait_reply(400);
+        }
+        uart_set_baudrate(RAD_UART_NUM, RAD_BAUD);
+        uart_flush_input(RAD_UART_NUM);
+        if (s_ver_ok) {
+            s_ver_ok = false;
+            for (int i = 0; i < 3 && !s_ver_ok; i++) {
+                uart_write_bytes(RAD_UART_NUM, VER_REQ, sizeof(VER_REQ));
+                wait_reply(400);
+            }
+            ESP_LOGI(TAG, "baud recovery %s",
+                     s_ver_ok ? "OK (radar back at 115200)" : "FAILED");
+        } else {
+            ESP_LOGW(TAG, "radar silent at 921600 too — continuing, "
+                     "will keep polling at %d", RAD_BAUD);
+        }
     }
     if (!s_ver_ok)
         ESP_LOGW(TAG, "no version reply — continuing, will keep polling");
