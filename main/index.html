@@ -73,6 +73,13 @@ main{flex:1;display:grid;grid-template-columns:1fr 360px;gap:12px;padding:12px;m
       </div>
       <span class="small" id="scale_hint"></span>
     </div>
+    <div class="row" style="margin:0">
+      <label class="small">多目标跟踪</label>
+      <div class="seg" id="seg_mt">
+        <button data-v="off" class="act">关</button><button data-v="on">开</button>
+      </div>
+      <span class="small">实验·推断ID（软件聚类，非雷达原生身份；幻影反射体也会成轨）</span>
+    </div>
     <canvas id="ppi"></canvas>
     <div id="evlog"></div>
   </div>
@@ -155,6 +162,38 @@ const trail=[];            /* 目标轨迹 {az, rmm, t0}，8s 渐隐 */
 const evLines=[];
 let scaleMode="auto";      /* auto | 2.5 | 5 | 10 (m) */
 const SOUND_RING_M=2.5;    /* 声音三角显示环：语音有效距离的显示约定（DOA 不测距） */
+/* 实验性软件多目标跟踪：把 2Hz 的单目标位置流按最近邻聚类（门限 1.2m）
+ * 分成多条轨迹并分配推断 ID。局限：靠近/交叉会跟混；幻影反射体同样成轨。 */
+let mtTrack=false;
+const tracks=[]; let trackSeq=0;
+const TRACK_COLORS=["#58a6ff","#3fb950","#f0883e","#bc8cff","#d29922","#39c5cf"];
+function trackFeed(azDeg,rmm){
+  const r=rmm/1000,X=r*Math.sin(azDeg*Math.PI/180),Y=-r*Math.cos(azDeg*Math.PI/180);
+  const now=performance.now();
+  let best=null,bd=1.2;
+  for(const t of tracks){
+    if(now-t.last>5000)continue;
+    const d=Math.hypot(t.X-X,t.Y-Y);
+    if(d<bd){bd=d;best=t;}
+  }
+  if(best){
+    best.X=X;best.Y=Y;best.last=now;
+    best.hist.push({X,Y,t:now});
+    if(best.hist.length>240)best.hist.shift();
+  }else if(tracks.length<6){
+    tracks.push({id:++trackSeq,X,Y,last:now,hist:[{X,Y,t:now}]});
+  }
+  for(let i=tracks.length-1;i>=0;i--)
+    if(now-tracks[i].last>8000)tracks.splice(i,1);
+}
+function trackSpeed(t){
+  const now=performance.now();
+  let a=null;
+  for(const p of t.hist){ if(now-p.t<=3000){a=p;break;} }
+  if(!a)return 0;
+  const dt=(now-a.t)/1000;
+  return dt>0.5?Math.hypot(t.X-a.X,t.Y-a.Y)/dt:0;
+}
 
 function toast(msg,ms=2500){const t=$("toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),ms);}
 function qs(k){return DEV?("?"+"device_id="+DEV+(k?"&"+k:"")):("?"+k);}
@@ -206,6 +245,7 @@ function render(s){
   if(rt.valid){
     trail.push({az:rt.azimuth,rmm:rt.range_mm,t0:performance.now()});
     while(trail.length&&performance.now()-trail[0].t0>8000)trail.shift();
+    if(mtTrack)trackFeed(rt.azimuth,rt.range_mm);
   }
   $("v_online").textContent=s.radar.online?"● 在线":"✕ 离线";
   $("v_online").style.color=s.radar.online?"var(--ok)":"var(--err)";
@@ -241,6 +281,13 @@ $("seg_scale").addEventListener("click",e=>{
   scaleMode=b.dataset.v;
   document.querySelectorAll("#seg_scale button").forEach(x=>x.classList.toggle("act",x===b));
   $("scale_hint").textContent=scaleMode==="auto"?"跟随目标距离自动缩放":"固定量程 "+scaleMode+"m";
+});
+$("seg_mt").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  mtTrack=b.dataset.v==="on";
+  document.querySelectorAll("#seg_mt button").forEach(x=>x.classList.toggle("act",x===b));
+  if(!mtTrack){tracks.length=0;trackSeq=0;}
+  toast(mtTrack?"多目标跟踪开：ID 为软件推断（含幻影反射体）":"多目标跟踪关");
 });
 $("btn_still").onclick=()=>{api("/api/mode",{still_min:parseInt($("still_min").value||"0")||0}).then(j=>{if(j){toast("✓ 长静止告警已设置");pollStatus();}});};
 
@@ -377,8 +424,37 @@ function draw(){
     g.restore();
   }
 
-  /* 目标轨迹尾迹（8s 渐隐；两簇点=雷达在两个反射体间切换） */
-  for(const p of trail){
+  /* 多目标跟踪层（实验）：每条轨迹独立颜色尾迹 + ID 标签 */
+  if(mtTrack){
+    const now2=performance.now();
+    for(const t of tracks){
+      const col=TRACK_COLORS[(t.id-1)%TRACK_COLORS.length];
+      /* 尾迹折线（8s 内的样本，透明度按新旧渐变） */
+      g.beginPath();
+      let started=false;
+      for(const p of t.hist){
+        if(now2-p.t>8000)continue;
+        const px=cx+p.X/maxM*R,py=cy-p.Y/maxM*R;
+        if(!started){g.moveTo(px,py);started=true;}else g.lineTo(px,py);
+      }
+      g.strokeStyle=col;g.lineWidth=2;g.globalAlpha=.8;g.stroke();
+      g.globalAlpha=1;g.lineWidth=1;
+      /* 当前位置圆点 + 标签 */
+      const px=cx+t.X/maxM*R,py=cy-t.Y/maxM*R;
+      g.beginPath();g.arc(px,py,9,0,2*Math.PI);
+      g.fillStyle=col;g.globalAlpha=.9;g.fill();g.globalAlpha=1;
+      g.fillStyle="#0d1117";g.font="bold 11px ui-monospace";
+      g.textAlign="center";g.textBaseline="middle";
+      g.fillText("T"+t.id,px,py);
+      const v=trackSpeed(t);
+      g.fillStyle=col;g.font="11px ui-monospace";
+      g.fillText("T"+t.id+" "+v.toFixed(1)+"m/s"+(v<0.1?" 静":""),px,py+22);
+      g.textBaseline="alphabetic";
+    }
+  }
+
+  /* 目标轨迹尾迹（8s 渐隐；两簇点=雷达在两个反射体间切换；开跟踪时隐藏避免混淆） */
+  if(!mtTrack)for(const p of trail){
     const age=(performance.now()-p.t0)/1000;
     const[tx,ty]=azXY(p.az,p.rmm/1000*R/maxM);
     g.beginPath();g.arc(tx,ty,2.5,0,2*Math.PI);
@@ -416,6 +492,7 @@ function draw(){
   /* 图例 */
   g.textAlign="left";g.textBaseline="middle";g.font="11px sans-serif";
   const lg=[["#e6edf3","本机"],["#f0883e","目标方框(状态色)"],["#f85149","声音三角@"+SOUND_RING_M+"m环"],["#d29922","舵机指向"],["#58a6ff","雷达扇区/轨迹"]];
+  if(mtTrack)lg.push(["#3fb950","Tn 跟踪轨迹(推断ID)"]);
   lg.forEach((it,i)=>{
     const y=14+i*16;
     g.fillStyle=it[0];g.fillRect(10,y-4,8,8);
