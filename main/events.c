@@ -28,6 +28,8 @@ static void mirror_to_evlog(uint8_t type, int16_t v1, int16_t v2)
     case AEVT_RADAR_ONLINE:  evlog_record(EV_RADAR_UP, 0, v1); break;
     case AEVT_STILL_ALARM:   evlog_record(EV_STILL, 1, v1); break;
     case AEVT_STILL_RECOVER: evlog_record(EV_STILL, 0, v1); break;
+    case AEVT_FALL_SUSPECT:  evlog_record(EV_FALL, 1, v1); break;
+    case AEVT_FALL_CLEAR:    evlog_record(EV_FALL, 0, v1); break;
     case AEVT_OOR:           evlog_record(EV_OOR, (uint8_t)v2, v1); break;
     default: break;
     }
@@ -89,6 +91,8 @@ const char *events_type_name(uint8_t type)
     case AEVT_RADAR_ONLINE:   return "RADAR_ONLINE";
     case AEVT_STILL_ALARM:    return "STILL_ALARM";
     case AEVT_STILL_RECOVER:  return "STILL_RECOVER";
+    case AEVT_FALL_SUSPECT:   return "FALL_SUSPECT";
+    case AEVT_FALL_CLEAR:     return "FALL_CLEAR";
     default:                  return "?";
     }
 }

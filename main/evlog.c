@@ -55,6 +55,7 @@ const char *evlog_type_str(uint8_t type)
         case EV_RADAR_DOWN:  return "RADAR_DOWN";
         case EV_STILL:       return "STILL";
         case EV_OOR:         return "OOR";
+        case EV_FALL:        return "FALL";
         default:             return "?";
     }
 }

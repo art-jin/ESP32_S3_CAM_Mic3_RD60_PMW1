@@ -210,7 +210,8 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"azimuth\":%.0f,"
         "\"sect\":\"%s\","
         "\"conf\":%.2f,"
-        "\"radar\":{\"online\":%s,\"target\":{\"valid\":%s,\"state\":\"%s\","
+        "\"radar\":{\"online\":%s,\"fall_detect\":%s,\"fall_state\":\"%s\","
+        "\"target\":{\"valid\":%s,\"state\":\"%s\","
         "\"range_mm\":%u,\"azimuth\":%.0f,\"rb_conf\":%u,\"ang_conf\":%u}},"
         "\"fusion\":{\"evaluated\":%s,\"associated\":%s,\"doa_az\":%.0f,"
         "\"radar_az\":%.0f,\"diff\":%.0f,\"range_mm\":%u},"
@@ -229,6 +230,9 @@ static esp_err_t handler_status(httpd_req_t *req)
         sect_label,
         st.confidence,
         rt_online ? "true" : "false",
+        mode_manager_get_fall_detect() ? "true" : "false",
+        radar_get_fall_state() == RADAR_FALL_SUSPECT ? "suspect" :
+        radar_get_fall_state() == RADAR_FALL_PENDING ? "pending" : "idle",
         rt_valid ? "true" : "false",
         rt_valid ? rt_state : "none",
         rt_valid ? rt.range_mm : 0,
@@ -386,9 +390,11 @@ static esp_err_t handler_mode(httpd_req_t *req)
     int gate_probe = -1;
     bool has_gate = json_get_int(body, "assoc_gate", &gate_probe);
 
-    if (!has_mode && !has_sub && !has_oor && !has_still && !has_gate) {
+    int fall_probe = -1;
+    bool has_fall = json_get_int(body, "fall_detect", &fall_probe);
+    if (!has_mode && !has_sub && !has_oor && !has_still && !has_gate && !has_fall) {
         return send_error(req, 400, "bad_request",
-                          "need at least one of 'mode'/'submode'/'oor'/'still_min'/'assoc_gate'");
+                          "need at least one of 'mode'/'submode'/'oor'/'still_min'/'assoc_gate'/'fall_detect'");
     }
 
     if (has_mode) {
@@ -450,17 +456,27 @@ static esp_err_t handler_mode(httpd_req_t *req)
         mode_manager_set_assoc_gate(gate != 0);
     }
 
+    int fall = -1;
+    json_get_int(body, "fall_detect", &fall);
+    if (fall > 1) {
+        return send_error(req, 400, "bad_request", "fall_detect must be 0 or 1");
+    }
+    if (fall >= 0) {
+        mode_manager_set_fall_detect(fall != 0);
+    }
+
     static const char *subnames[] = {"audio_only", "fusion", "radar_follow"};
     static const char *oornames[] = {"hold", "clamp", "home", "scan"};
-    char resp[144];
+    char resp[168];
     snprintf(resp, sizeof(resp),
              "{\"ok\":true,\"mode\":\"%s\",\"submode\":\"%s\",\"oor\":\"%s\","
-             "\"still_min\":%u,\"assoc_gate\":%s}",
+             "\"still_min\":%u,\"assoc_gate\":%s,\"fall_detect\":%s}",
              mode_manager_get() == MODE_COMMAND ? "command" : "track",
              subnames[mode_manager_get_submode()],
              oornames[mode_manager_get_oor_policy()],
              (unsigned)mode_manager_get_still_min(),
-             mode_manager_get_assoc_gate() ? "true" : "false");
+             mode_manager_get_assoc_gate() ? "true" : "false",
+             mode_manager_get_fall_detect() ? "true" : "false");
     return send_json_ok(req, resp);
 }
 

@@ -71,6 +71,12 @@ uint16_t mode_manager_get_still_min(void);
 void mode_manager_set_assoc_gate(bool on);
 bool mode_manager_get_assoc_gate(void);
 
+/* Fall-suspect detector (weak-feature range-step chain, bench-validated
+ * 2026-09-07): emits FALL_SUSPECT / FALL_CLEAR events. Default ON.
+ * Persisted in NVS. */
+void mode_manager_set_fall_detect(bool on);
+bool mode_manager_get_fall_detect(void);
+
 /* Called from mic_task at 20Hz. Checks command-mode timeout. */
 void mode_manager_tick(void);
 

@@ -15,6 +15,7 @@
  * 0x59 reply -> offline. Radar is then ignored until replies resume.
  */
 
+#include <math.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -295,6 +296,189 @@ static radar_tgt_state_t decode_state(uint8_t det)
     return RADAR_TGT_NONE;
 }
 
+/* ---- Fall-suspect detector v3 (bench-validated 2026-09-07/09) ----
+ *
+ * The real lying-down signature is BIMODAL RANGE OSCILLATION: a fallen
+ * body spans torso(~1.3m) to feet(~2.1m) from the sensor, and the
+ * aggregated target hops between body parts every few hundred ms.
+ * Standing/sitting reads compact (<30 cm spread); walking sweeps
+ * monotonically (few midpoint crossings, drifting median). Detection:
+ * over a 4 s ring, range spread >=50 cm, >=4 midpoint crossings
+ * (oscillation, not sweep), median stable (<=25 cm drift), preceded by
+ * motion — sustained 8 s -> FALL_SUSPECT. Clears when the spread
+ * collapses (stood up), sustained motion, or target loss.
+ * Weak-feature detector: dialogue verification lives in orchestration. */
+#define FALL_WIN_N      20     /* 4 s ring at 5 Hz */
+#define FALL_SPREAD_MM  500
+#define FALL_CROSS_MIN  4
+#define FALL_MED_DRIFT  300
+#define FALL_CONFIRM_MS 2500
+#define FALL_CLEAR_MS   5000
+#define FALL_CLEAR_V    2
+
+static volatile int s_fall_state = RADAR_FALL_IDLE;
+static uint16_t s_fr[FALL_WIN_N];
+static uint8_t  s_fst[FALL_WIN_N];
+static int64_t  s_ft[FALL_WIN_N];
+static int s_fall_n, s_fall_idx;
+static int64_t s_fall_qual_us = -1;
+static int64_t s_fall_lastqual_us = -1;
+static float s_fall_med0;
+static int s_fall_clear_v;
+static int64_t s_fall_last_us = -1;
+
+static void fall_reset(void)
+{
+    s_fall_n = 0;
+    s_fall_idx = 0;
+    s_fall_qual_us = -1;
+    s_fall_clear_v = 0;
+}
+
+int radar_get_fall_state(void)
+{
+    return s_fall_state;
+}
+
+static void fall_fire(int16_t range_cm, int16_t ang)
+{
+    s_fall_state = RADAR_FALL_SUSPECT;
+    s_fall_clear_v = 0;
+    events_push(AEVT_FALL_SUSPECT, range_cm,
+                (int16_t)(RADAR_AZ_OFFSET_DEG + RADAR_AZ_SCALE * (float)ang));
+    ESP_LOGW(TAG, "FALL SUSPECT: bimodal oscillation confirmed (%ucm)",
+             (unsigned)range_cm);
+}
+
+/* Runs in the radar task on every published 0x30 sample (5 Hz). */
+static void fall_feed(bool valid, radar_tgt_state_t st,
+                      uint16_t rmm, int16_t ang, uint8_t rbc)
+{
+    int64_t now = esp_timer_get_time();
+
+    if (!mode_manager_get_fall_detect()) {
+        if (s_fall_state == RADAR_FALL_SUSPECT) events_push(AEVT_FALL_CLEAR, 0, 0);
+        s_fall_state = RADAR_FALL_IDLE;
+        fall_reset();
+        return;
+    }
+
+    /* Clean samples only; the ring keeps updating even while latched so
+     * the clear decision sees the current body geometry. */
+    if (!valid || rbc < 12) {
+        if (s_fall_state == RADAR_FALL_SUSPECT && valid &&
+            now - s_fall_last_us > 10000000LL) {
+            s_fall_state = RADAR_FALL_IDLE;
+            fall_reset();
+            events_push(AEVT_FALL_CLEAR, 0, 0);
+            ESP_LOGI(TAG, "FALL CLEAR (target lost)");
+        }
+        if (!valid) s_fall_last_us = now;   /* keep gap clock running */
+        return;
+    }
+
+    if (s_fall_state == RADAR_FALL_SUSPECT) {
+        s_fr[s_fall_idx] = rmm;
+        s_fst[s_fall_idx] = (uint8_t)st;
+        s_ft[s_fall_idx] = now;
+        s_fall_idx = (s_fall_idx + 1) % FALL_WIN_N;
+        if (s_fall_n < FALL_WIN_N) s_fall_n++;
+        if (s_fall_n == FALL_WIN_N &&
+            now - s_ft[s_fall_idx] >= 3000000LL) {
+            uint16_t mn = 0xFFFF, mx = 0;
+            int motion_cnt = 0;
+            for (int i = 0; i < FALL_WIN_N; i++) {
+                if (s_fr[i] < mn) mn = s_fr[i];
+                if (s_fr[i] > mx) mx = s_fr[i];
+                if (s_fst[i] == RADAR_TGT_MOTION) motion_cnt++;
+            }
+            /* Upright-and-moving again: body compact + real motion. A
+             * lying body keeps a >50cm spread no matter how its parts
+             * flip between motion/breath states. */
+            if (mx - mn < 350 && motion_cnt >= 4) {
+                s_fall_state = RADAR_FALL_IDLE;
+                fall_reset();
+                events_push(AEVT_FALL_CLEAR, 0, 0);
+                ESP_LOGI(TAG, "FALL CLEAR (upright, spread=%d)", mx - mn);
+            }
+        }
+        s_fall_last_us = now;
+        return;
+    }
+    if (s_fall_last_us > 0 && now - s_fall_last_us > 5000000LL)
+        fall_reset();                  /* long gap: restart the window */
+    s_fall_last_us = now;
+
+    /* push into the ring */
+    s_fr[s_fall_idx] = rmm;
+    s_fst[s_fall_idx] = (uint8_t)st;
+    s_ft[s_fall_idx] = now;
+    s_fall_idx = (s_fall_idx + 1) % FALL_WIN_N;
+    if (s_fall_n < FALL_WIN_N) s_fall_n++;
+    if (s_fall_n < FALL_WIN_N) return;
+
+    /* window must span ~4 s (guard against bursty replies) */
+    if (now - s_ft[s_fall_idx] < 3000000LL) return;
+
+    uint16_t mn = 0xFFFF, mx = 0;
+    bool any_motion = false;
+    for (int i = 0; i < FALL_WIN_N; i++) {
+        if (s_fr[i] < mn) mn = s_fr[i];
+        if (s_fr[i] > mx) mx = s_fr[i];
+        if (s_fst[i] == RADAR_TGT_MOTION) any_motion = true;
+    }
+    float mid = (mn + mx) / 2.0f;
+    int spread = mx - mn;
+
+    /* midpoint crossings with 1-sample debounce: count runs of
+     * same-side samples, ignore single-sample spikes */
+    int runs = 0, last_side = 0, run_len = 0;
+    for (int i = 0; i < FALL_WIN_N; i++) {
+        int side = s_fr[i] > mid ? 1 : (s_fr[i] < mid ? -1 : 0);
+        if (side == 0) side = last_side;
+        if (side != last_side && last_side != 0 && run_len >= 1) runs++;
+        if (side != 0) { if (side != last_side) run_len = 1; else run_len++; }
+        if (side != 0) last_side = side;
+    }
+
+    /* median of the window (small n: insertion sort a copy) */
+    uint16_t tmp[FALL_WIN_N];
+    memcpy(tmp, s_fr, sizeof(tmp));
+    for (int i = 1; i < FALL_WIN_N; i++) {
+        uint16_t k = tmp[i]; int j = i - 1;
+        while (j >= 0 && tmp[j] > k) { tmp[j+1] = tmp[j]; j--; }
+        tmp[j+1] = k;
+    }
+    float med = tmp[FALL_WIN_N / 2];
+
+    bool qualify = spread >= FALL_SPREAD_MM && runs >= FALL_CROSS_MIN &&
+                   any_motion;
+    if (qualify) {
+        s_fall_lastqual_us = now;
+        if (s_fall_qual_us < 0) {
+            s_fall_qual_us = now;
+            s_fall_med0 = med;
+            ESP_LOGI(TAG, "fall: bimodal burst spread=%dmm runs=%d — confirming",
+                     spread, runs);
+        } else if (fabsf(med - s_fall_med0) <= FALL_MED_DRIFT &&
+                   now - s_fall_qual_us >= FALL_CONFIRM_MS * 1000LL) {
+            fall_fire((int16_t)(med / 10), ang);
+            return;
+        } else if (fabsf(med - s_fall_med0) > FALL_MED_DRIFT) {
+            /* clusters moving (pacing, not lying) — restart confirm */
+            s_fall_qual_us = now;
+            s_fall_med0 = med;
+        }
+    } else if (s_fall_lastqual_us > 0 &&
+               now - s_fall_lastqual_us > 3000000LL) {
+        /* the burst is transient: only fully reset after 3 s of quiet.
+         * The settle onto one body part afterwards is expected and must
+         * not abort an in-progress confirmation. */
+        s_fall_qual_us = -1;
+        s_fall_lastqual_us = -1;
+    }
+}
+
 /* Raw angles scatter ±20°+ while the target moves/speaks (torso sway +
  * multipath); confidence-qualified still frames are stable. Median of the
  * last RAD_ANG_HIST qualified samples gives a usable azimuth for fusion. */
@@ -353,6 +537,8 @@ static void publish(uint8_t det_result, uint16_t range_mm, int16_t angle_deg,
     s_target.frame_idx = frame_idx;
     s_target.last_seen_ms = esp_timer_get_time() / 1000;
     xSemaphoreGive(s_lock);
+
+    fall_feed(det_result != 0, s_target.state, range_mm, angle_deg, rb_conf);
 
     if (was_valid != s_target.valid) {
         if (s_target.valid) {

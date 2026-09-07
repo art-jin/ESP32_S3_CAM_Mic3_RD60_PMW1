@@ -39,6 +39,7 @@ enum {
     EV_RADAR_DOWN = 10, /* flags=0,               value=0 */
     EV_STILL      = 11, /* flags=1=alarm/0=recover, value=range_cm */
     EV_OOR        = 12, /* flags=oor_policy id,   value=target_deg */
+    EV_FALL       = 13, /* flags=1=suspect/0=clear, value=range_cm */
 };
 
 /* Sources for EV_SERVO_CMD. */

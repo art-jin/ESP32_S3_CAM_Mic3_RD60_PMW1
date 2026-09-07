@@ -50,6 +50,15 @@ bool radar_is_online(void);
  * detected; *out is still filled with state=NONE fields in that case. */
 bool radar_get_target(radar_target_t *out);
 
+/* Fall-suspect detector state (weak-feature range-step chain). */
+typedef enum {
+    RADAR_FALL_IDLE = 0,
+    RADAR_FALL_PENDING,     /* step detected, waiting for stationary confirm */
+    RADAR_FALL_SUSPECT,     /* fired; latched until motion resumes / leave */
+} radar_fall_state_t;
+
+int radar_get_fall_state(void);   /* radar_fall_state_t */
+
 /* Notify the radar module that speech/DOA activity was observed (used by
  * the stillness care alarm as a recovery trigger). */
 void radar_notify_sound(void);

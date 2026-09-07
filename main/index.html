@@ -120,6 +120,10 @@ main{flex:1;display:grid;grid-template-columns:1fr 360px;gap:12px;padding:12px;m
     <div class="panel" id="p_radar">
       <h2>雷达</h2>
       <div class="kv"><span>链路</span><b id="v_online">--</b></div>
+      <div class="row" style="margin-top:6px"><label class="small">跌倒线索</label>
+        <div class="seg" id="seg_fall"><button data-v="0" class="act">关</button><button data-v="1">开</button></div>
+        <b class="small" id="v_fall"></b>
+      </div>
       <div class="kv"><span>目标状态</span><b id="v_state">--</b></div>
       <div class="kv"><span>距离 / 方位</span><b id="v_rng">--</b></div>
       <div class="kv"><span>置信 rb/ang</span><b id="v_rconf">--</b></div>
@@ -247,6 +251,9 @@ function render(s){
   $("v_conf").textContent=s.conf!=null?s.conf.toFixed(2):"--";
   $("v_servo").textContent=s.servo.toFixed(1)+"°"+(s.moving?" ⏵":"");
   const rt=s.radar.target;
+  setSeg("seg_fall",s.radar.fall_detect?"1":"0");
+  $("v_fall").textContent=s.radar.fall_state==="idle"?"":s.radar.fall_state==="pending"?"⏳ 确认中…":"⚠ 疑似跌倒!";
+  $("v_fall").style.color=s.radar.fall_state==="suspect"?"var(--err)":"var(--warn)";
   if(rt.valid){
     trail.push({az:rt.azimuth,rmm:rt.range_mm,t0:performance.now()});
     while(trail.length&&performance.now()-trail[0].t0>8000)trail.shift();
@@ -297,6 +304,10 @@ $("seg_mt").addEventListener("click",e=>{
   document.querySelectorAll("#seg_mt button").forEach(x=>x.classList.toggle("act",x===b));
   if(!mtTrack){tracks.length=0;trackSeq=0;}
   toast(mtTrack?"多目标跟踪开：ID 为软件推断（含幻影反射体）":"多目标跟踪关");
+});
+$("seg_fall").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  api("/api/mode",{fall_detect:parseInt(b.dataset.v)}).then(j=>{if(j){toast("✓ 跌倒线索检测已"+(parseInt(b.dataset.v)?"开":"关"));pollStatus();}});
 });
 $("btn_still").onclick=()=>{api("/api/mode",{still_min:parseInt($("still_min").value||"0")||0}).then(j=>{if(j){toast("✓ 长静止告警已设置");pollStatus();}});};
 

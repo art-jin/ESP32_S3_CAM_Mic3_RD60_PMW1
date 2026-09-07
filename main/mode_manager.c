@@ -19,6 +19,7 @@ static track_submode_t s_submode = TRACK_AUDIO_ONLY;
 static oor_policy_t    s_oor_policy = OOR_HOLD;
 static uint16_t        s_still_min = 0;   /* 0 = still-alarm disabled */
 static bool            s_assoc_gate = false;
+static bool            s_fall_detect = true;
 
 static const char *submode_name(track_submode_t s)
 {
@@ -68,6 +69,9 @@ static void cfg_load(void)
     uint8_t g;
     if (nvs_get_u8(h, "assocgate", &g) == ESP_OK && g <= 1)
         s_assoc_gate = g != 0;
+    uint8_t f;
+    if (nvs_get_u8(h, "falldet", &f) == ESP_OK && f <= 1)
+        s_fall_detect = f != 0;
     nvs_close(h);
 }
 
@@ -191,4 +195,17 @@ void mode_manager_set_assoc_gate(bool on)
 bool mode_manager_get_assoc_gate(void)
 {
     return s_assoc_gate;
+}
+
+void mode_manager_set_fall_detect(bool on)
+{
+    if (on == s_fall_detect) return;
+    ESP_LOGI(TAG, "fall-suspect detector: %s", on ? "ON" : "OFF");
+    s_fall_detect = on;
+    cfg_save("falldet", on ? 1 : 0);
+}
+
+bool mode_manager_get_fall_detect(void)
+{
+    return s_fall_detect;
 }
