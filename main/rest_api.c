@@ -210,7 +210,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"azimuth\":%.0f,"
         "\"sect\":\"%s\","
         "\"conf\":%.2f,"
-        "\"radar\":{\"online\":%s,\"fall_detect\":%s,\"fall_state\":\"%s\","
+        "\"radar\":{\"online\":%s,\"fall_detect\":%s,\"fall_state\":\"%s\",\"spread_mm\":%d,"
         "\"target\":{\"valid\":%s,\"state\":\"%s\","
         "\"range_mm\":%u,\"azimuth\":%.0f,\"rb_conf\":%u,\"ang_conf\":%u}},"
         "\"fusion\":{\"evaluated\":%s,\"associated\":%s,\"doa_az\":%.0f,"
@@ -233,6 +233,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         mode_manager_get_fall_detect() ? "true" : "false",
         radar_get_fall_state() == RADAR_FALL_SUSPECT ? "suspect" :
         radar_get_fall_state() == RADAR_FALL_PENDING ? "pending" : "idle",
+        radar_get_spread_mm(),
         rt_valid ? "true" : "false",
         rt_valid ? rt_state : "none",
         rt_valid ? rt.range_mm : 0,

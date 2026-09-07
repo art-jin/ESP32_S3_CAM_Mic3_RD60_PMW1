@@ -322,6 +322,7 @@ static uint8_t  s_fst[FALL_WIN_N];
 static int64_t  s_ft[FALL_WIN_N];
 static int s_fall_n, s_fall_idx;
 static int64_t s_fall_qual_us = -1;
+static volatile int s_fall_spread;   /* ring spread, mm — >=500 = lying */
 static int64_t s_fall_lastqual_us = -1;
 static float s_fall_med0;
 static int s_fall_clear_v;
@@ -338,6 +339,11 @@ static void fall_reset(void)
 int radar_get_fall_state(void)
 {
     return s_fall_state;
+}
+
+int radar_get_spread_mm(void)
+{
+    return s_fall_spread;
 }
 
 static void fall_fire(int16_t range_cm, int16_t ang)
@@ -395,6 +401,7 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
             /* Upright-and-moving again: body compact + real motion. A
              * lying body keeps a >50cm spread no matter how its parts
              * flip between motion/breath states. */
+            s_fall_spread = mx - mn;
             if (mx - mn < 350 && motion_cnt >= 4) {
                 s_fall_state = RADAR_FALL_IDLE;
                 fall_reset();
@@ -415,7 +422,7 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     s_ft[s_fall_idx] = now;
     s_fall_idx = (s_fall_idx + 1) % FALL_WIN_N;
     if (s_fall_n < FALL_WIN_N) s_fall_n++;
-    if (s_fall_n < FALL_WIN_N) return;
+    if (s_fall_n < FALL_WIN_N) { s_fall_spread = 0; return; }
 
     /* window must span ~4 s (guard against bursty replies) */
     if (now - s_ft[s_fall_idx] < 3000000LL) return;
@@ -429,6 +436,7 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     }
     float mid = (mn + mx) / 2.0f;
     int spread = mx - mn;
+    s_fall_spread = spread;
 
     /* midpoint crossings with 1-sample debounce: count runs of
      * same-side samples, ignore single-sample spikes */

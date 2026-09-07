@@ -58,6 +58,7 @@ typedef enum {
 } radar_fall_state_t;
 
 int radar_get_fall_state(void);   /* radar_fall_state_t */
+int radar_get_spread_mm(void);    /* ring spread; >=500 mm = lying */
 
 /* Notify the radar module that speech/DOA activity was observed (used by
  * the stillness care alarm as a recovery trigger). */

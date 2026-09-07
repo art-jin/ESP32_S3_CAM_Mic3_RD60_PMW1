@@ -125,6 +125,7 @@ main{flex:1;display:grid;grid-template-columns:1fr 360px;gap:12px;padding:12px;m
         <b class="small" id="v_fall"></b>
       </div>
       <div class="kv"><span>目标状态</span><b id="v_state">--</b></div>
+      <div class="kv"><span>姿态</span><b id="v_posture">--</b></div>
       <div class="kv"><span>距离 / 方位</span><b id="v_rng">--</b></div>
       <div class="kv"><span>置信 rb/ang</span><b id="v_rconf">--</b></div>
       <div class="kv"><span>雷达原始角</span><b id="v_rawang">--</b></div>
@@ -262,6 +263,8 @@ function render(s){
   $("v_online").textContent=s.radar.online?"● 在线":"✕ 离线";
   $("v_online").style.color=s.radar.online?"var(--ok)":"var(--err)";
   $("v_state").innerHTML=rt.valid?'<span class="st '+rt.state+'">'+stName[rt.state]+"</span>":'<span class="st none">无目标</span>';
+  const spd=s.radar.spread_mm||0;
+  $("v_posture").innerHTML=spd>=500?'🛌 <b style="color:var(--warn)">躺</b>（散布 '+(spd/10)+'cm）':(spd>0?'直立（散布 '+(spd/10)+'cm）':"--");
   $("v_rng").textContent=rt.valid?(rt.range_mm/1000).toFixed(2)+"m / "+rt.azimuth.toFixed(0)+"°":"--";
   $("v_rconf").textContent=rt.rb_conf+" / "+rt.ang_conf;
   $("v_rawang").textContent=rt.valid&&rt.azimuth!=null?("az "+rt.azimuth.toFixed(0)+"°"):"--";
@@ -495,6 +498,10 @@ function draw(){
     g.font="11px ui-monospace";
     g.fillText((t.range_mm/1000).toFixed(2)+"m "+t.azimuth.toFixed(0)+"°",x1,y1+33);
     if(weak)g.fillText("低置信",x1,y1-28);
+    if(s.radar.spread_mm>=500){
+      g.font="bold 13px sans-serif";g.fillStyle="#d29922";
+      g.fillText("🛌 躺",x1,y1-28);
+    }
     g.restore();
     /* 关联连线：找最近的关联三角 */
     if(s.fusion.associated){
