@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ESP32-S3-SuperMini + 3DMIC-291 three-mic array + **MS60-1211S80M 60GHz mmWave radar** + 1-channel PWM servo. Goal: combine the existing acoustic sound-source localization (DOA + servo tracking) with the radar's multi-target motion sensing — 声源定位与多目标运动状态探测.
 
-**Current status: radar fusion feature complete (2026-09-02), Phases 0-4 committed; pending: T9 regression, T10 24h soak, T5 physical OOR test.** The mic-array + servo + REST-API stack was imported from the base project's working tree into `main/`; the radar work added `radar.c` (5Hz 0x30 poll driver), `fusion.c` (sound↔target association), `events.c` (scene-event ring), tracking sub-modes + OOR policy in `mode_manager`/`tracker`, and new REST endpoints (`/api/events`, extended `/api/status` + `/api/mode`). Read `ArthurReadMe.md` (requirements) first, then `tasks/prd-radar-audio-fusion.md` (PRD — scope, coverage zones, test matrix) and `tasks/radar-protocol-notes.md` (measured radar protocol facts: 115200 baud, poll-only single aggregated target, phantom-target saga, azimuth mapping az=187+2.1×angle, stillness-alarm lessons).
+**Current status: feature-complete through fall detection (2026-09-09); tags `v0.1.0-radar-fusion` / `v0.2.0-visualizer` on GitHub.** The mic-array + servo + REST-API stack was imported from the base project's working tree into `main/`; this project added: `radar.c` (5Hz 0x30 poll driver with offline auto-recovery + baud self-heal, stillness alarm, **fall-suspect detector** — bimodal range-oscillation signature, see protocol notes §11, and the config-request mailbox), `fusion.c` (sound↔target association + the optional association gate that blocks robot-speaker capture), `events.c` (scene-event ring), tracking sub-modes + OOR policy in `mode_manager`/`tracker`, the embedded visualization page (`main/index.html` served at `/`, EMBED_FILES — PPI scope, controls, radar config panel, experimental multi-target tracking, lying-posture badge), and REST endpoints (`/api/events`, `/api/radar(+/reset)`, extended `/api/status` + `/api/mode`). Pending: T9 regression, T10 24h soak, T5 physical OOR test, bed-zone suppression for bedside fall deployment (protocol notes §11 — lying-on-bed and lying-on-floor range clusters overlap). Read `ArthurReadMe.md` (requirements) first, then `tasks/prd-radar-audio-fusion.md` (PRD), `tasks/radar-protocol-notes.md` (measured facts and detector constants) and `tasks/visualizer-design.md` (page design).
+
+**Bench workflow**: `tools/capture.py [秒] [正则]` — countdown banner + per-second timer + regex-filtered live tail over the USB serial; full log lands in `/tmp/capture_last.log`. Synchronized captures (user acts while the tool runs) are the standard way to validate detector changes.
 
 ## Base project (source of existing code)
 
@@ -74,4 +76,4 @@ Verify the serial port for this SuperMini board before flashing (the base projec
 
 ## GitHub delivery
 
-When the initial version works, publish to the user's GitHub as new repo **`ESP32_S3_CAM_Mic3_RD60_PMW1`** (confirm with the user before the first push).
+Published at `art-jin/ESP32_S3_CAM_Mic3_RD60_PMW1` (public, `main`). Pushes go through a local proxy at 127.0.0.1:7001 — when it is down, direct pushes fail; wait for the user to bring it up (the user manages it) rather than reconfiguring git.
