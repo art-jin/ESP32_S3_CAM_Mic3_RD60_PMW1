@@ -10,6 +10,8 @@ ESP32-S3-SuperMini + 3DMIC-291 three-mic array + **MS60-1211S80M 60GHz mmWave ra
 
 **Bench workflow**: `tools/capture.py [秒] [正则]` — countdown banner + per-second timer + regex-filtered live tail over the USB serial; full log lands in `/tmp/capture_last.log`. Synchronized captures (user acts while the tool runs) are the standard way to validate detector changes.
 
+**Cross-repo project**: 雷达人感触发免唤醒词对话（presence-triggered wake）→ single source of truth at `../Hermes_ESP32_MQTT/docs/48-radar-presence-trigger.md`. **This repo owns Tier 1** (MQTT publisher + Zone presence state machine on the radar neck; current deployment robot is **redwolf**, prefix `arthur139/redwolf`). Update that doc's §12/§15 after each task.
+
 ## Base project (source of existing code)
 
 The inherited stack comes from `~/PycharmProjects/ESP32_S3_CAM_Mic3_PMW1` (GitHub: `art-jin/ESP32_S3_CAM_Mic3_PMW1`), copied here as a fresh repo (no shared git history). The import captured the base project's **uncommitted v2.6 working-tree state**: `BOARD_ESP32_S3_SUPERMINI` + `SERVO_MODEL_MG90S_DIRECT_DRIVE` already enabled in `main/board_config.h`, and the EPD scaffold files removed.
