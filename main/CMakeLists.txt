@@ -1,3 +1,3 @@
-idf_component_register(SRCS "main.c" "mic_capture.c" "doa.c" "servo.c" "tracker.c" "wifi.c" "rest_api.c" "mode_manager.c" "status.c" "evlog.c" "radar.c" "fusion.c" "events.c" "radar_probe.c"
+idf_component_register(SRCS "main.c" "mic_capture.c" "doa.c" "servo.c" "tracker.c" "wifi.c" "rest_api.c" "mode_manager.c" "status.c" "evlog.c" "radar.c" "fusion.c" "events.c" "radar_probe.c" "mqtt_publisher.c" "zone_tracker.c"
                     INCLUDE_DIRS "."
                     EMBED_FILES "index.html")

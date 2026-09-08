@@ -20,6 +20,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -28,6 +29,8 @@
 #include "radar.h"
 #include "events.h"
 #include "mode_manager.h"
+#include "zone_tracker.h"
+#include "mqtt_publisher.h"
 
 #define RAD_UART_NUM    UART_NUM_1
 #define RAD_BAUD        115200
@@ -556,6 +559,18 @@ static void publish(uint8_t det_result, uint16_t range_mm, int16_t angle_deg,
             events_push(AEVT_TARGET_LEAVE, (int16_t)s_target.azimuth_deg, 0);
         }
     }
+
+    /* docs/48 Tier 1: presence-zone edges → MQTT (independent of the REST
+     * event ring above — zone events only leave the device via broker). */
+    zone_edge_t ze = zone_sm_feed(det_result != 0, range_mm, rb_conf,
+                                  s_target.last_seen_ms);
+    if (ze == ZONE_EDGE_ENTER) {
+        mqtt_publish_event(MQTT_EVT_ZONE_ENTER, range_mm,
+                           (int16_t)s_target.azimuth_deg, rb_conf);
+    } else if (ze == ZONE_EDGE_LEAVE) {
+        mqtt_publish_event(MQTT_EVT_ZONE_LEAVE, 0,
+                           (int16_t)s_target.azimuth_deg, 0);
+    }
     if (was_valid != s_target.valid || was_state != s_target.state) {
         ESP_LOGI(TAG, "%s: %s range=%umm angle=%+d° filt=%+d° az=%.0f° conf=%u/%u",
                  s_target.valid ? "target" : "cleared",
@@ -761,6 +776,12 @@ static void radar_task(void *arg)
             if (was_online && !s_online) {
                 ESP_LOGW(TAG, "OFFLINE (%u polls unanswered) — degrading", miss);
                 events_push(AEVT_RADAR_OFFLINE, 0, 0);
+                /* Tear down any in-zone state first so consumers see the
+                 * trailing zone_leave before radar_offline (docs/48 §5.3). */
+                if (zone_sm_reset() == ZONE_EDGE_LEAVE) {
+                    mqtt_publish_event(MQTT_EVT_ZONE_LEAVE, 0, 0, 0);
+                }
+                mqtt_publish_event(MQTT_EVT_RADAR_OFFLINE, 0, 0, 0);
                 xSemaphoreTake(s_lock, portMAX_DELAY);
                 s_target.valid = false;
                 s_target.state = RADAR_TGT_NONE;
@@ -775,6 +796,7 @@ static void radar_task(void *arg)
             } else if (!was_online && s_online) {
                 ESP_LOGI(TAG, "back ONLINE");
                 events_push(AEVT_RADAR_ONLINE, 0, 0);
+                mqtt_publish_event(MQTT_EVT_RADAR_ONLINE, 0, 0, 0);
             }
 
             /* Auto-recovery: this module has a recurring hung state
@@ -888,13 +910,16 @@ static void radar_task(void *arg)
 #undef STILL_RECOVER
 
             ESP_LOGI(TAG, "[5s] online=%d tgt=%d(%s) range=%umm angle=%+d° "
-                     "filt=%+d° az=%.0f° conf=%u/%u rx=%uB r30=%u miss=%u bad_ck=%u stray=%u",
+                     "filt=%+d° az=%.0f° conf=%u/%u rx=%uB r30=%u miss=%u bad_ck=%u stray=%u "
+                     "heap=%u/%u",
                      s_online, t.valid, state_name(t.state),
                      t.valid ? t.range_mm : 0, t.valid ? t.angle_deg : 0,
                      t.valid ? t.angle_filt_deg : 0,
                      t.valid ? t.azimuth_deg : 0.0f,
                      t.rb_conf, t.angle_conf,
-                     c_rx, c_30, c_miss, c_bad_ck, c_stray);
+                     c_rx, c_30, c_miss, c_bad_ck, c_stray,
+                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)esp_get_minimum_free_heap_size());
             c_rx = c_30 = 0;
             last_stats = now;
         }

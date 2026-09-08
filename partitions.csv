@@ -4,11 +4,16 @@
 # re-flash. coredump partition (64 KB) captures panic dumps for post-mortem
 # analysis (idf.py coredump-info / coredump-debug).
 #
-# Total: 24K (nvs) + 4K (phy) + 1024K (app) + 64K (coredump) = 1116 KB,
-# leaves ~900 KB spare on 2 MB flash.
+# 2026-09-08: factory grown 1M → 1536K for the MQTT/TLS stack (docs/48 Tier 1):
+# the previous image was ~960 KB of a 1024 KB app slot; esp_mqtt + esp-tls +
+# mbedtls X.509 + full CA bundle add ~150 KB. nvs offset untouched (device ID
+# survives); coredump moves later in flash — old dumps are lost on re-flash.
+#
+# Total: 24K (nvs) + 4K (phy) + 1536K (app) + 64K (coredump) = 1628 KB,
+# leaves ~400 KB spare on 2 MB flash.
 #
 # Name,   Type, SubType, Offset,  Size,     Flags
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     ,        0x1000,
-factory,  app,  factory, ,        1M,
+factory,  app,  factory, ,        1536K,
 coredump, data, coredump,,        0x10000,

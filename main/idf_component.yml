@@ -1,2 +1,5 @@
 dependencies:
   espressif/mdns: "^1.2.0"
+  ## esp_mqtt was removed from IDF core components in v6.0. The component
+  ## registry's geo-CDN 403s from this network, so the mqtt component is
+  ## vendored from IDF v5.5.2's core into components/mqtt/ (same upstream).

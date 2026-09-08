@@ -1,0 +1,10 @@
+// Copy this file to mqtt_creds.h and fill in the neck MQTT credentials.
+// mqtt_creds.h is gitignored — it will NOT be committed to GitHub.
+//
+// Broker user is provisioned on the Aliyun shared broker (see
+// ../Hermes_ESP32_MQTT/deploy/aliyun-broker/) with a write-only ACL
+// scoped to <robot_prefix>/neck/# — docs/48 §5.5.
+#define MQTT_BROKER_URI   "mqtts://mqtt.kincal.cn:8883"
+#define MQTT_USERNAME     "your_robot_neck_user"
+#define MQTT_PASSWORD     "your_neck_password"
+#define MQTT_ROBOT_PREFIX "family/robot"

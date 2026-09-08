@@ -21,6 +21,8 @@
 #include "radar.h"
 #include "fusion.h"
 #include "radar_probe.h"
+#include "zone_tracker.h"
+#include "mqtt_publisher.h"
 
 static const char *TAG = "main";
 
@@ -254,12 +256,17 @@ void app_main(void)
 
     /* Radar — enhancement, not a dependency: degrades to audio-only on
      * link failure (see radar.c). Phase 1: state only, no servo action. */
+    zone_tracker_init();  /* docs/48 Tier 1 presence-zone config (NVS "zcfg") */
     radar_init();
     fusion_init();   /* sound↔radar association metadata (Phase 2) */
 
     /* WiFi — non-blocking, connects in background. REST API starts
      * automatically once IP is obtained. Track mode works without WiFi. */
     wifi_init();
+
+    /* docs/48 Tier 1: neck-event MQTT publisher — connects once WiFi has
+     * an IP; never blocks radar/servo/REST (internal queue + own task). */
+    mqtt_publisher_init();
 
     /* 8 KB stack covers the FFT scratch (static) + libc math + ESP_LOG. */
     xTaskCreate(mic_task, "mic", 8192, NULL,

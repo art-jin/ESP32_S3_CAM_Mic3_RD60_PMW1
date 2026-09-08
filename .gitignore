@@ -100,3 +100,6 @@ main/tft.h
 ESP32-S3CAM.pdf
 REST_API_PLAN.md
 main/wifi_creds.h
+
+# MQTT neck credentials (docs/48 Tier 1)
+main/mqtt_creds.h

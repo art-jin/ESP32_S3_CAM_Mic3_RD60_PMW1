@@ -15,6 +15,8 @@
 #include "radar.h"
 #include "fusion.h"
 #include "events.h"
+#include "zone_tracker.h"
+#include "mqtt_publisher.h"
 
 static const char *TAG = "rest";
 static httpd_handle_t s_server = NULL;
@@ -197,7 +199,7 @@ static esp_err_t handler_status(httpd_req_t *req)
     default:                 rt_state = "none";     break;
     }
 
-    char body[800];
+    char body[900];
     snprintf(body, sizeof(body),
         "{\"ok\":true,"
         "\"mode\":\"%s\","
@@ -215,6 +217,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"range_mm\":%u,\"azimuth\":%.0f,\"rb_conf\":%u,\"ang_conf\":%u}},"
         "\"fusion\":{\"evaluated\":%s,\"associated\":%s,\"doa_az\":%.0f,"
         "\"radar_az\":%.0f,\"diff\":%.0f,\"range_mm\":%u},"
+        "\"mqtt\":{\"connected\":%s,\"seq\":%lu,\"dropped\":%lu,\"in_zone\":%s},"
         "\"wifi\":\"%s\","
         "\"ip\":\"%s\","
         "\"host\":\"%s\""
@@ -244,6 +247,10 @@ static esp_err_t handler_status(httpd_req_t *req)
         fr.associated ? "true" : "false",
         fr.doa_az_deg, fr.radar_az_deg, fr.angle_diff_deg,
         fr.range_mm,
+        mqtt_publisher_is_connected() ? "true" : "false",
+        (unsigned long)mqtt_publisher_seq(),
+        (unsigned long)mqtt_publisher_dropped(),
+        zone_in() ? "true" : "false",
         st.wifi_connected ? "connected" : "disconnected",
         st.ip[0] ? st.ip : "",
         st.hostname[0] ? st.hostname : "");
@@ -492,27 +499,35 @@ static esp_err_t handler_radar_get(httpd_req_t *req)
         return send_error(req, 503, "radar_busy",
                           "radar busy/offline, try again");
     }
-    char body[480];
+    const zone_cfg_t *z = zone_cfg();
+    char body[560];
     snprintf(body, sizeof(body),
         "{\"ok\":true,\"online\":%s,\"sensing\":%s,"
         "\"bounds\":{\"mot\":[%u,%u],\"micro\":[%u,%u],\"bhr\":[%u,%u]},"
         "\"cfg\":{\"mot\":[%u,%u],\"mot_lvl\":%u,"
         "\"micro\":[%u,%u],\"micro_lvl\":%u,"
-        "\"bhr\":[%u,%u],\"bhr_lvl\":%u}}",
+        "\"bhr\":[%u,%u],\"bhr_lvl\":%u},"
+        "\"zone\":{\"enter_mm\":%u,\"debounce\":%u,\"hyst_mm\":%u,"
+        "\"leave\":%u,\"lost_ms\":%u}}",
         c.online ? "true" : "false",
         c.sensing ? "true" : "false",
         c.b_mot_min, c.b_mot_max, c.b_micro_min, c.b_micro_max,
         c.b_bhr_min, c.b_bhr_max,
         c.mot_min, c.mot_max, c.mot_lvl,
         c.micro_min, c.micro_max, c.micro_lvl,
-        c.bhr_min, c.bhr_max, c.bhr_lvl);
+        c.bhr_min, c.bhr_max, c.bhr_lvl,
+        z->enter_mm, z->debounce, z->hyst_mm, z->leave, z->lost_ms);
     return send_json_ok(req, body);
 }
 
 /* POST /api/radar?device_id=XXXX — apply config fields (all optional,
  * cm units, levels 0-10) and optionally save to the radar's flash.
  * Body: {"sensing":1,"mot_min":50,"mot_max":1000,"mot_lvl":5,
- *        "bhr_min":80,"bhr_max":255,"bhr_lvl":3,"save":1} */
+ *        "bhr_min":80,"bhr_max":255,"bhr_lvl":3,"save":1}
+ * docs/48 zone params (ESP-side, NVS "zcfg", mm units) are also accepted
+ * here: {"zone_enter_mm":1500,"zone_debounce":3,"zone_hyst_mm":400,
+ *        "zone_leave":5,"zone_lost_ms":2000} — they don't touch the radar
+ * module, so they work even while it is offline. */
 static esp_err_t handler_radar_post(httpd_req_t *req)
 {
     if (!check_auth(req)) return ESP_OK;
@@ -520,8 +535,33 @@ static esp_err_t handler_radar_post(httpd_req_t *req)
     char body[MAX_BODY_LEN];
     if (!read_body(req, body, sizeof(body))) return ESP_OK;
 
+    /* Zone params first — pure ESP-side, never needs the radar mailbox. */
+    zone_cfg_t z = *zone_cfg();
+    bool zone_touched = false;
+    int tmp;   /* reused by the radar-module fields below */
+    if (json_get_int(body, "zone_enter_mm", &tmp)) {
+        z.enter_mm = (uint16_t)tmp; zone_touched = true;
+    }
+    if (json_get_int(body, "zone_debounce", &tmp)) {
+        z.debounce = (uint16_t)tmp; zone_touched = true;
+    }
+    if (json_get_int(body, "zone_hyst_mm", &tmp)) {
+        z.hyst_mm = (uint16_t)tmp; zone_touched = true;
+    }
+    if (json_get_int(body, "zone_leave", &tmp)) {
+        z.leave = (uint16_t)tmp; zone_touched = true;
+    }
+    if (json_get_int(body, "zone_lost_ms", &tmp)) {
+        z.lost_ms = (uint16_t)tmp; zone_touched = true;
+    }
+    if (zone_touched && !zone_cfg_set(&z)) {
+        return send_error(req, 400, "bad_request",
+                          "zone param out of range (enter 300-6000, "
+                          "debounce 1-10, hyst 50-2000, leave 1-20, "
+                          "lost 200-10000)");
+    }
+
     radar_set_req_t r = {0};
-    int tmp;
     if (json_get_int(body, "sensing", &tmp)) {
         r.mask |= RAD_SET_SENSING;
         r.sensing = tmp != 0;
@@ -553,8 +593,19 @@ static esp_err_t handler_radar_post(httpd_req_t *req)
     if (json_get_int(body, "save", &tmp) && tmp) r.mask |= RAD_SET_SAVE;
 
     if (!r.mask) {
+        if (zone_touched) {
+            /* Zone-only request — nothing to forward to the radar. */
+            const zone_cfg_t *zc = zone_cfg();
+            char zo[240];
+            snprintf(zo, sizeof(zo),
+                "{\"ok\":true,\"zone\":{\"enter_mm\":%u,\"debounce\":%u,"
+                "\"hyst_mm\":%u,\"leave\":%u,\"lost_ms\":%u}}",
+                zc->enter_mm, zc->debounce, zc->hyst_mm, zc->leave,
+                zc->lost_ms);
+            return send_json_ok(req, zo);
+        }
         return send_error(req, 400, "bad_request",
-                          "no valid fields (sensing/mot_min/mot_max/mot_lvl/bhr_min/bhr_max/bhr_lvl/save)");
+                          "no valid fields (sensing/mot_min/mot_max/mot_lvl/bhr_min/bhr_max/bhr_lvl/save or zone_*)");
     }
 
     radar_cfg_t c;
@@ -570,15 +621,19 @@ static esp_err_t handler_radar_post(httpd_req_t *req)
     if ((r.mask & RAD_SET_BHR_MAX) && c.bhr_max != r.bhr_max) v_ok = false;
     if ((r.mask & RAD_SET_SENSING) && c.sensing != r.sensing) v_ok = false;
 
-    char out[480];
+    char out[560];
+    const zone_cfg_t *zc = zone_cfg();
     snprintf(out, sizeof(out),
         "{\"ok\":true,\"verified\":%s,"
         "\"cfg\":{\"mot\":[%u,%u],\"mot_lvl\":%u,\"bhr\":[%u,%u],\"bhr_lvl\":%u,"
-        "\"sensing\":%s}}",
+        "\"sensing\":%s},"
+        "\"zone\":{\"enter_mm\":%u,\"debounce\":%u,\"hyst_mm\":%u,"
+        "\"leave\":%u,\"lost_ms\":%u}}",
         v_ok ? "true" : "false (readback differs — some settings are "
                        "ineffective in this firmware)",
         c.mot_min, c.mot_max, c.mot_lvl, c.bhr_min, c.bhr_max, c.bhr_lvl,
-        c.sensing ? "true" : "false");
+        c.sensing ? "true" : "false",
+        zc->enter_mm, zc->debounce, zc->hyst_mm, zc->leave, zc->lost_ms);
     return send_json_ok(req, out);
 }
 
