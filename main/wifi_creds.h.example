@@ -2,3 +2,11 @@
 // wifi_creds.h is gitignored — it will NOT be committed to GitHub.
 #define WIFI_SSID     "your_ssid"
 #define WIFI_PASSWORD "your_password"
+
+// Neck static-IP identity (consumed by board_config.h USE_STATIC_IP).
+// One ACTIVE block per robot; flip when flashing a different neck.
+// Known allocations: redwolf=192.168.1.110, heizai=192.168.1.113.
+#define STATIC_IP_ADDR      "192.168.1.113"
+#define STATIC_IP_GW        "192.168.1.1"
+#define STATIC_IP_NETMASK   "255.255.255.0"
+#define STATIC_IP_DNS       "192.168.1.1"

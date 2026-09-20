@@ -47,15 +47,13 @@
     #define LED_GPIO            48   /* On-board LED, may not match */
 
     /* Static IP — pinned so external callers can always reach this device at
-     * the same address regardless of which physical board is flashed (the
-     * original "红太狼" board was 4T1VMF @ 192.168.1.110; this replacement
-     * inherits that identity). Gateway/netmask validated against the host
-     * network (192.168.1.1 / 24) on 2026-08-02. */
+     * the same address regardless of which physical board is flashed. The
+     * per-robot address (redwolf=.110, heizai=.113) lives in the gitignored
+     * wifi_creds.h next to the WiFi password — one local file per neck
+     * deployment, flip the active block when flashing a different robot.
+     * Gateway/netmask validated against the host network (192.168.1.1 / 24)
+     * on 2026-08-02. */
     #define USE_STATIC_IP       1
-    #define STATIC_IP_ADDR      "192.168.1.110"
-    #define STATIC_IP_GW        "192.168.1.1"
-    #define STATIC_IP_NETMASK   "255.255.255.0"
-    #define STATIC_IP_DNS       "192.168.1.1"
 
     /* GPIO 10-15 (silkscreen "8"-"13") are FREE — previously reserved for the
      * EPD e-ink experiment, removed 2026-09-02 (hardware never verified). */
