@@ -1,7 +1,14 @@
 // Copy this file to wifi_creds.h and fill in your WiFi credentials.
 // wifi_creds.h is gitignored — it will NOT be committed to GitHub.
-#define WIFI_SSID     "your_ssid"
-#define WIFI_PASSWORD "your_password"
+// Dual-slot: order = priority, boot always tries slot 0 first.
+// Design + tuning: tasks/wifi-dual-network.md
+#define WIFI0_SSID        "your_home_ssid"
+#define WIFI0_PASSWORD    "your_home_password"
+#define WIFI0_USE_STATIC  1    // 1 = use STATIC_IP_* below (robot identity)
+
+#define WIFI1_SSID        "your_hotspot_ssid"      // must be 2.4GHz band
+#define WIFI1_PASSWORD    "your_hotspot_password"
+#define WIFI1_USE_STATIC  0    // 0 = DHCP (hotspot subnets vary)
 
 // Neck static-IP identity (consumed by board_config.h USE_STATIC_IP).
 // One ACTIVE block per robot; flip when flashing a different neck.

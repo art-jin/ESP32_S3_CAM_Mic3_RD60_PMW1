@@ -55,6 +55,14 @@
      * on 2026-08-02. */
     #define USE_STATIC_IP       1
 
+    /* Dual-slot WiFi failover tuning (see tasks/wifi-dual-network.md).
+     * RETRY_MAX: quick reconnect attempts on the SAME slot before rotating
+     *   (3 ≈ rides out transient drops, e.g. router reboot blips).
+     * SWITCH_DELAY_MS: pause after rotating to the next slot before
+     *   connecting (full no-network cycle ≈ 30s, avoids hammering the radio). */
+    #define WIFI_SLOT_RETRY_MAX       3
+    #define WIFI_SLOT_SWITCH_DELAY_MS 5000
+
     /* GPIO 10-15 (silkscreen "8"-"13") are FREE — previously reserved for the
      * EPD e-ink experiment, removed 2026-09-02 (hardware never verified). */
 

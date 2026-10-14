@@ -10,7 +10,7 @@ ESP32-S3-SuperMini + 3DMIC-291 three-mic array + **MS60-1211S80M 60GHz mmWave ra
 
 **Bench workflow**: `tools/capture.py [秒] [正则]` — countdown banner + per-second timer + regex-filtered live tail over the USB serial; full log lands in `/tmp/capture_last.log`. Synchronized captures (user acts while the tool runs) are the standard way to validate detector changes.
 
-**Cross-repo project**: 雷达人感触发免唤醒词对话（presence-triggered wake）→ single source of truth at `../Hermes_ESP32_MQTT/docs/48-radar-presence-trigger.md`. **This repo owns Tier 1** (MQTT publisher + Zone presence state machine on the radar neck; current deployment robot is **heizai (黑崽)**, IP .113, prefix `arthur139/heizai` — previous robot redwolf .110 is now INACTIVE; per-robot identity switches live in the gitignored `main/wifi_creds.h` + `main/mqtt_creds.h` ACTIVE/INACTIVE blocks). Update that doc's §12/§15 after each task.
+**Cross-repo project**: 雷达人感触发免唤醒词对话（presence-triggered wake）→ single source of truth at `../Hermes_ESP32_MQTT/docs/48-radar-presence-trigger.md`. **This repo owns Tier 1** (MQTT publisher + Zone presence state machine on the radar neck; current deployment robot is **heizai (黑崽)**, IP .113, prefix `arthur139/heizai` — previous robot redwolf .110 is now INACTIVE; per-robot identity switches live in the gitignored `main/wifi_creds.h` + `main/mqtt_creds.h` ACTIVE/INACTIVE blocks; wifi_creds.h is dual-slot — slot 0 home+static IP, slot 1 phone-hotspot+DHCP with failover rotation, design/tuning/test record in `tasks/wifi-dual-network.md`). Update that doc's §12/§15 after each task.
 
 ## Base project (source of existing code)
 
