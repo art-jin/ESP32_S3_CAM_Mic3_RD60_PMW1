@@ -35,6 +35,8 @@ Radar ↔ ESP32-S3-SuperMini (from `ArthurReadMe.md`):
 
 Mic array / servo / LED GPIO map for SuperMini (from base project's CLAUDE.md; no conflicts with radar pins 8/9/11): CLK0=3, DAT0=4, CLK1=5, DAT1=6, servo=7, LED=48.
 
+Bench wire colors (recorded 2026-10-19 re-wiring, TX/RX corrected same day after silent-radar debug): 3DMIC — CLK0/GPIO3=green, DAT0/GPIO4=blue, CLK1/GPIO5=purple, DAT1/GPIO6=gray, 3V3=red, GND=brown; servo signal (GPIO7)=orange/yellow. Radar — VCC=red, GND=black (both connectors), TX→GPIO9=white, RX→GPIO8=gray, OUT→GPIO10=orange/yellow (unused by firmware; docs table says GPIO11). Colors repeat across harnesses: gray = DAT1 & radar RX; orange/yellow = servo & radar OUT.
+
 **SuperMini pitfalls** (details in base CLAUDE.md):
 - Silkscreen numbers are offset +2 from actual GPIO numbers (silkscreen "N" = GPIO N+2)
 - Servo GND must be common-grounded with 3DMIC GND and the board, or PWM has no return path
