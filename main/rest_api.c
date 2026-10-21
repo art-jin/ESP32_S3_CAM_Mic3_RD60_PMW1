@@ -16,6 +16,7 @@
 #include "fusion.h"
 #include "events.h"
 #include "zone_tracker.h"
+#include "bed_zone.h"
 #include "mqtt_publisher.h"
 
 static const char *TAG = "rest";
@@ -218,6 +219,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"fusion\":{\"evaluated\":%s,\"associated\":%s,\"doa_az\":%.0f,"
         "\"radar_az\":%.0f,\"diff\":%.0f,\"range_mm\":%u},"
         "\"mqtt\":{\"connected\":%s,\"seq\":%lu,\"dropped\":%lu,\"in_zone\":%s},"
+        "\"bed\":{\"window\":[%u,%u],\"suppressed\":%lu,\"night\":%s},"
         "\"wifi\":\"%s\","
         "\"ip\":\"%s\","
         "\"host\":\"%s\""
@@ -251,6 +253,9 @@ static esp_err_t handler_status(httpd_req_t *req)
         (unsigned long)mqtt_publisher_seq(),
         (unsigned long)mqtt_publisher_dropped(),
         zone_in() ? "true" : "false",
+        bed_cfg()->min_mm, bed_cfg()->max_mm,
+        (unsigned long)bed_zone_suppressed_count(),
+        bed_zone_is_night() ? "true" : "false",
         st.wifi_connected ? "connected" : "disconnected",
         st.ip[0] ? st.ip : "",
         st.hostname[0] ? st.hostname : "");
@@ -500,7 +505,8 @@ static esp_err_t handler_radar_get(httpd_req_t *req)
                           "radar busy/offline, try again");
     }
     const zone_cfg_t *z = zone_cfg();
-    char body[560];
+    const bed_cfg_t *b = bed_cfg();
+    char body[640];
     snprintf(body, sizeof(body),
         "{\"ok\":true,\"online\":%s,\"sensing\":%s,"
         "\"bounds\":{\"mot\":[%u,%u],\"micro\":[%u,%u],\"bhr\":[%u,%u]},"
@@ -508,7 +514,9 @@ static esp_err_t handler_radar_get(httpd_req_t *req)
         "\"micro\":[%u,%u],\"micro_lvl\":%u,"
         "\"bhr\":[%u,%u],\"bhr_lvl\":%u},"
         "\"zone\":{\"enter_mm\":%u,\"debounce\":%u,\"hyst_mm\":%u,"
-        "\"leave\":%u,\"lost_ms\":%u}}",
+        "\"leave\":%u,\"lost_ms\":%u},"
+        "\"bed\":{\"min_mm\":%u,\"max_mm\":%u,\"cont_s\":%u,\"traj_s\":%u,"
+        "\"night\":[%u,%u],\"night_now\":%s,\"suppressed\":%u}}",
         c.online ? "true" : "false",
         c.sensing ? "true" : "false",
         c.b_mot_min, c.b_mot_max, c.b_micro_min, c.b_micro_max,
@@ -516,7 +524,11 @@ static esp_err_t handler_radar_get(httpd_req_t *req)
         c.mot_min, c.mot_max, c.mot_lvl,
         c.micro_min, c.micro_max, c.micro_lvl,
         c.bhr_min, c.bhr_max, c.bhr_lvl,
-        z->enter_mm, z->debounce, z->hyst_mm, z->leave, z->lost_ms);
+        z->enter_mm, z->debounce, z->hyst_mm, z->leave, z->lost_ms,
+        b->min_mm, b->max_mm, b->cont_s, b->traj_s,
+        b->night_start_h, b->night_end_h,
+        bed_zone_is_night() ? "true" : "false",
+        (unsigned)bed_zone_suppressed_count());
     return send_json_ok(req, body);
 }
 
@@ -561,6 +573,43 @@ static esp_err_t handler_radar_post(httpd_req_t *req)
                           "lost 200-10000)");
     }
 
+    /* docs/52 P0-2 bed-window params (pure ESP-side, NVS "bcfg"). Both
+     * bounds must arrive together; 0/0 disables suppression. */
+    bed_cfg_t b = *bed_cfg();
+    bool bed_touched = false;
+    if (json_get_int(body, "bed_min_mm", &tmp)) {
+        b.min_mm = (uint16_t)tmp; bed_touched = true;
+    }
+    if (json_get_int(body, "bed_max_mm", &tmp)) {
+        b.max_mm = (uint16_t)tmp; bed_touched = true;
+    }
+    if (json_get_int(body, "bed_cont_s", &tmp)) {
+        b.cont_s = (uint16_t)tmp; bed_touched = true;
+    }
+    if (json_get_int(body, "bed_traj_s", &tmp)) {
+        b.traj_s = (uint16_t)tmp; bed_touched = true;
+    }
+    if (json_get_int(body, "bed_night_start", &tmp)) {
+        b.night_start_h = (uint8_t)tmp; bed_touched = true;
+    }
+    if (json_get_int(body, "bed_night_end", &tmp)) {
+        b.night_end_h = (uint8_t)tmp; bed_touched = true;
+    }
+    if (bed_touched && !bed_cfg_set(&b)) {
+        return send_error(req, 400, "bad_request",
+                          "bed param out of range (min 300-5900, max 400-6000 "
+                          "and > min, or 0/0 to disable; cont/traj 10-1800s; "
+                          "night hours 0-23)");
+    }
+    char profile[12] = {0};
+    if (json_get_str(body, "profile", profile, sizeof(profile))) {
+        if (strcmp(profile, "bedside") != 0 && strcmp(profile, "desk") != 0) {
+            return send_error(req, 400, "bad_request",
+                              "profile must be 'bedside' or 'desk'");
+        }
+        bed_zone_profile(profile);
+    }
+
     radar_set_req_t r = {0};
     if (json_get_int(body, "sensing", &tmp)) {
         r.mask |= RAD_SET_SENSING;
@@ -593,19 +642,24 @@ static esp_err_t handler_radar_post(httpd_req_t *req)
     if (json_get_int(body, "save", &tmp) && tmp) r.mask |= RAD_SET_SAVE;
 
     if (!r.mask) {
-        if (zone_touched) {
-            /* Zone-only request — nothing to forward to the radar. */
+        if (zone_touched || bed_touched || profile[0]) {
+            /* ESP-side-only request — nothing to forward to the radar. */
             const zone_cfg_t *zc = zone_cfg();
-            char zo[240];
+            const bed_cfg_t *bc = bed_cfg();
+            char zo[320];
             snprintf(zo, sizeof(zo),
                 "{\"ok\":true,\"zone\":{\"enter_mm\":%u,\"debounce\":%u,"
-                "\"hyst_mm\":%u,\"leave\":%u,\"lost_ms\":%u}}",
+                "\"hyst_mm\":%u,\"leave\":%u,\"lost_ms\":%u},"
+                "\"bed\":{\"min_mm\":%u,\"max_mm\":%u,\"cont_s\":%u,"
+                "\"traj_s\":%u,\"night\":[%u,%u]}}",
                 zc->enter_mm, zc->debounce, zc->hyst_mm, zc->leave,
-                zc->lost_ms);
+                zc->lost_ms,
+                bc->min_mm, bc->max_mm, bc->cont_s, bc->traj_s,
+                bc->night_start_h, bc->night_end_h);
             return send_json_ok(req, zo);
         }
         return send_error(req, 400, "bad_request",
-                          "no valid fields (sensing/mot_min/mot_max/mot_lvl/bhr_min/bhr_max/bhr_lvl/save or zone_*)");
+                          "no valid fields (sensing/mot_min/mot_max/mot_lvl/bhr_min/bhr_max/bhr_lvl/save or zone_*/bed_*/profile)");
     }
 
     radar_cfg_t c;

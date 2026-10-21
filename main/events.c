@@ -51,6 +51,12 @@ static void mirror_to_evlog(uint8_t type, int16_t v1, int16_t v2,
         evlog_record(EV_FALL, 0, v1);
         mqtt_publish_event_diag(MQTT_EVT_FALL_CLEAR, 0, 0, 0, diag1, diag2);
         break;
+    case AEVT_IN_BED_STILL:
+        /* evlog value 2 = suppressed-in-bed (0 clear / 1 suspect). */
+        evlog_record(EV_FALL, 2, v1);
+        mqtt_publish_event_diag(MQTT_EVT_IN_BED_STILL,
+                                (uint32_t)v1 * 10, v2, conf, diag1, diag2);
+        break;
     case AEVT_OOR:           evlog_record(EV_OOR, (uint8_t)v2, v1); break;
     default: break;
     }
@@ -120,6 +126,7 @@ const char *events_type_name(uint8_t type)
     case AEVT_STILL_RECOVER:  return "STILL_RECOVER";
     case AEVT_FALL_SUSPECT:   return "FALL_SUSPECT";
     case AEVT_FALL_CLEAR:     return "FALL_CLEAR";
+    case AEVT_IN_BED_STILL:   return "IN_BED_STILL";
     default:                  return "?";
     }
 }

@@ -22,6 +22,7 @@
 #include "fusion.h"
 #include "radar_probe.h"
 #include "zone_tracker.h"
+#include "bed_zone.h"
 #include "mqtt_publisher.h"
 
 static const char *TAG = "main";
@@ -257,6 +258,7 @@ void app_main(void)
     /* Radar — enhancement, not a dependency: degrades to audio-only on
      * link failure (see radar.c). Phase 1: state only, no servo action. */
     zone_tracker_init();  /* docs/48 Tier 1 presence-zone config (NVS "zcfg") */
+    bed_zone_init();      /* docs/52 P0-2 bed-window config (NVS "bcfg") */
     radar_init();
     fusion_init();   /* sound↔radar association metadata (Phase 2) */
 

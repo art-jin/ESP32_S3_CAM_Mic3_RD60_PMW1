@@ -30,6 +30,7 @@
 #include "events.h"
 #include "mode_manager.h"
 #include "zone_tracker.h"
+#include "bed_zone.h"
 #include "mqtt_publisher.h"
 
 #define RAD_UART_NUM    UART_NUM_1
@@ -352,14 +353,26 @@ int radar_get_spread_mm(void)
 static void fall_fire(int16_t range_cm, int16_t ang, uint8_t rbc,
                       int16_t spread_mm, int16_t runs)
 {
+    int16_t az = (int16_t)(RADAR_AZ_OFFSET_DEG + RADAR_AZ_SCALE * (float)ang);
+    /* docs/52 P0-2 (49 §3.1.4): demote in-bed bursts without latching —
+     * the detector re-arms immediately, so a real bed-exit fall that
+     * follows a suppressed burst still fires. */
+    if (bed_zone_should_suppress((uint16_t)(range_cm * 10),
+                                 esp_timer_get_time())) {
+        events_push_diag(AEVT_IN_BED_STILL, range_cm, az, rbc,
+                         spread_mm, runs);
+        ESP_LOGW(TAG, "IN-BED STILL: burst inside bed window — suppressed "
+                 "(%ucm spread=%dmm runs=%d)", (unsigned)range_cm,
+                 spread_mm, runs);
+        fall_reset();
+        return;
+    }
     s_fall_state = RADAR_FALL_SUSPECT;
     s_fall_clear_v = 0;
     /* docs/52 P0-1: single push carries the radar conf (rbc) and the
      * qualifying spread/runs — MQTT publish rides the evlog mirror path
      * inside events.c (same-critical-section requirement). */
-    events_push_diag(AEVT_FALL_SUSPECT, range_cm,
-                     (int16_t)(RADAR_AZ_OFFSET_DEG + RADAR_AZ_SCALE * (float)ang),
-                     rbc, spread_mm, runs);
+    events_push_diag(AEVT_FALL_SUSPECT, range_cm, az, rbc, spread_mm, runs);
     ESP_LOGW(TAG, "FALL SUSPECT: bimodal oscillation confirmed (%ucm)",
              (unsigned)range_cm);
 }
@@ -470,7 +483,14 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     }
     float med = tmp[FALL_WIN_N / 2];
 
-    bool qualify = spread >= FALL_SPREAD_MM && runs >= FALL_CROSS_MIN &&
+    /* docs/52 P0-2: at night demand one extra midpoint crossing and a
+     * longer settle before confirming — rolling in sleep must not page
+     * anyone. Clock unsynced ⇒ day (normal sensitivity, fail-safe). */
+    bool night = bed_zone_is_night();
+    uint16_t cross_min = FALL_CROSS_MIN + (night ? 1 : 0);
+    int64_t confirm_us = ((int64_t)FALL_CONFIRM_MS + (night ? 1500 : 0)) * 1000LL;
+
+    bool qualify = spread >= FALL_SPREAD_MM && runs >= cross_min &&
                    any_motion;
     if (qualify) {
         s_fall_lastqual_us = now;
@@ -480,7 +500,7 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
             ESP_LOGI(TAG, "fall: bimodal burst spread=%dmm runs=%d — confirming",
                      spread, runs);
         } else if (fabsf(med - s_fall_med0) <= FALL_MED_DRIFT &&
-                   now - s_fall_qual_us >= FALL_CONFIRM_MS * 1000LL) {
+                   now - s_fall_qual_us >= confirm_us) {
             fall_fire((int16_t)(med / 10), ang, rbc,
                       (int16_t)spread, (int16_t)runs);
             return;
@@ -573,6 +593,10 @@ static void publish(uint8_t det_result, uint16_t range_mm, int16_t angle_deg,
      * event ring above — zone events only leave the device via broker). */
     zone_edge_t ze = zone_sm_feed(det_result != 0, range_mm, rb_conf,
                                   s_target.last_seen_ms);
+    bed_zone_feed(zone_in(), det_result != 0 && rb_conf >= 12,
+                  s_target.state == RADAR_TGT_MOTION,
+                  (uint16_t)radar_get_spread_mm(),
+                  esp_timer_get_time());
     if (ze == ZONE_EDGE_ENTER) {
         mqtt_publish_event(MQTT_EVT_ZONE_ENTER, range_mm,
                            (int16_t)s_target.azimuth_deg, rb_conf);
