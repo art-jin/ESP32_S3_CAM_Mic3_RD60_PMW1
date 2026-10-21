@@ -49,6 +49,7 @@ typedef struct {
     uint32_t range_mm;
     int16_t  az_deg;
     uint8_t  conf;
+    uint16_t spread_mm;
 } neck_evt_t;
 
 static const char *evt_type_str(mqtt_event_type_t t)
@@ -58,6 +59,10 @@ static const char *evt_type_str(mqtt_event_type_t t)
     case MQTT_EVT_ZONE_LEAVE:   return "zone_leave";
     case MQTT_EVT_RADAR_ONLINE: return "radar_online";
     case MQTT_EVT_RADAR_OFFLINE:return "radar_offline";
+    case MQTT_EVT_FALL_SUSPECT: return "fall_suspect";
+    case MQTT_EVT_FALL_CLEAR:   return "fall_clear";
+    case MQTT_EVT_STILL_ALARM:  return "still_alarm";
+    case MQTT_EVT_STILL_RECOVER:return "still_recover";
     default:                    return "?";
     }
 }
@@ -128,12 +133,14 @@ static void publisher_task(void *arg)
 
         int n = snprintf(payload, sizeof(payload),
             "{\"boots\":%lu,\"seq\":%lu,\"sec\":%lu,\"usec\":%lu,"
-            "\"type\":\"%s\",\"range_mm\":%lu,\"az_deg\":%d,\"conf\":%u}",
+            "\"type\":\"%s\",\"range_mm\":%lu,\"az_deg\":%d,\"conf\":%u,"
+            "\"spread_mm\":%u}",
             (unsigned long)evlog_get_boot_count(),
             (unsigned long)evt.seq,
             (unsigned long)evt.sec, (unsigned long)evt.usec,
             evt_type_str(evt.type),
-            (unsigned long)evt.range_mm, evt.az_deg, evt.conf);
+            (unsigned long)evt.range_mm, evt.az_deg, evt.conf,
+            evt.spread_mm);
 
         snprintf(topic, sizeof(topic), "%s", s_topic_events);
         int msg_id = esp_mqtt_client_publish(s_client, topic, payload, n, 1, 0);
@@ -211,6 +218,12 @@ void mqtt_publisher_init(void)
 bool mqtt_publish_event(mqtt_event_type_t type, uint32_t range_mm,
                         int16_t az_deg, uint8_t conf)
 {
+    return mqtt_publish_event_full(type, range_mm, az_deg, conf, 0);
+}
+
+bool mqtt_publish_event_full(mqtt_event_type_t type, uint32_t range_mm,
+                             int16_t az_deg, uint8_t conf, uint16_t spread_mm)
+{
     if (!s_evtq) return false;
 
     neck_evt_t evt = {
@@ -219,6 +232,7 @@ bool mqtt_publish_event(mqtt_event_type_t type, uint32_t range_mm,
         .range_mm = range_mm,
         .az_deg = az_deg,
         .conf = conf,
+        .spread_mm = spread_mm,
     };
     struct timeval tv;
     gettimeofday(&tv, NULL);

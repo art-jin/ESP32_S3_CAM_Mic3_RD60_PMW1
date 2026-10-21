@@ -21,6 +21,13 @@ typedef enum {
     MQTT_EVT_ZONE_LEAVE,
     MQTT_EVT_RADAR_ONLINE,
     MQTT_EVT_RADAR_OFFLINE,
+    /* docs/52 P0-1: fall/still detection events (algorithms already live
+     * in radar.c; these make them leave the device). */
+    MQTT_EVT_FALL_SUSPECT,
+    MQTT_EVT_FALL_CLEAR,
+    MQTT_EVT_STILL_ALARM,
+    MQTT_EVT_STILL_RECOVER,
+    /* MQTT_EVT_IN_BED_STILL reserved for P0-2 bed-zone suppression. */
 } mqtt_event_type_t;
 
 /* One-time setup: queue + publisher task + IP-event hook. Connects and
@@ -31,6 +38,12 @@ void mqtt_publisher_init(void);
  * the queue is full (event dropped, counted in mqtt_publisher_dropped). */
 bool mqtt_publish_event(mqtt_event_type_t type, uint32_t range_mm,
                         int16_t az_deg, uint8_t conf);
+
+/* Variant carrying one diagnostic metric (serialized as trailing
+ * "spread_mm"; 0 = not applicable) — used by fall_suspect so the cloud
+ * gets the ring spread that fired the detection (P0-2 tuning data). */
+bool mqtt_publish_event_full(mqtt_event_type_t type, uint32_t range_mm,
+                             int16_t az_deg, uint8_t conf, uint16_t spread_mm);
 
 bool mqtt_publisher_is_connected(void);
 
