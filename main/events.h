@@ -36,6 +36,13 @@ void events_init(void);
 /* Push one event. Safe from any task. */
 void events_push(uint8_t type, int16_t v1, int16_t v2);
 
+/* Same, plus sensor confidence and fall-detector diagnostics
+ * (diag1=spread_mm, diag2=runs; negative ⇒ absent) that ride the
+ * evlog↔MQTT mirror path as optional payload extension fields. Ring
+ * entry itself is unchanged (v1/v2 only). */
+void events_push_diag(uint8_t type, int16_t v1, int16_t v2, uint8_t conf,
+                      int16_t diag1, int16_t diag2);
+
 /* Copy events with seq > since into out[] (up to max). Returns the count;
  * *next is set to the newest seq present (0 when the ring is empty). */
 int events_get(app_event_t *out, int max, uint32_t since, uint32_t *next);

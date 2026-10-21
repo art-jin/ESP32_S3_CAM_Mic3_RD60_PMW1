@@ -349,19 +349,17 @@ int radar_get_spread_mm(void)
     return s_fall_spread;
 }
 
-static void fall_fire(int16_t range_cm, int16_t ang, uint8_t rbc)
+static void fall_fire(int16_t range_cm, int16_t ang, uint8_t rbc,
+                      int16_t spread_mm, int16_t runs)
 {
     s_fall_state = RADAR_FALL_SUSPECT;
     s_fall_clear_v = 0;
-    events_push(AEVT_FALL_SUSPECT, range_cm,
-                (int16_t)(RADAR_AZ_OFFSET_DEG + RADAR_AZ_SCALE * (float)ang));
-    /* docs/52 P0-1: mirror onto MQTT with the qualifying spread for
-     * cloud-side tuning (P0-2 bed-zone calibration data). */
-    mqtt_publish_event_full(MQTT_EVT_FALL_SUSPECT,
-                            (uint32_t)range_cm * 10,
-                            (int16_t)(RADAR_AZ_OFFSET_DEG +
-                                      RADAR_AZ_SCALE * (float)ang),
-                            rbc, (uint16_t)s_fall_spread);
+    /* docs/52 P0-1: single push carries the radar conf (rbc) and the
+     * qualifying spread/runs — MQTT publish rides the evlog mirror path
+     * inside events.c (same-critical-section requirement). */
+    events_push_diag(AEVT_FALL_SUSPECT, range_cm,
+                     (int16_t)(RADAR_AZ_OFFSET_DEG + RADAR_AZ_SCALE * (float)ang),
+                     rbc, spread_mm, runs);
     ESP_LOGW(TAG, "FALL SUSPECT: bimodal oscillation confirmed (%ucm)",
              (unsigned)range_cm);
 }
@@ -375,7 +373,6 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     if (!mode_manager_get_fall_detect()) {
         if (s_fall_state == RADAR_FALL_SUSPECT) {
             events_push(AEVT_FALL_CLEAR, 0, 0);
-            mqtt_publish_event(MQTT_EVT_FALL_CLEAR, 0, 0, 0);
         }
         s_fall_state = RADAR_FALL_IDLE;
         fall_reset();
@@ -390,7 +387,6 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
             s_fall_state = RADAR_FALL_IDLE;
             fall_reset();
             events_push(AEVT_FALL_CLEAR, 0, 0);
-            mqtt_publish_event(MQTT_EVT_FALL_CLEAR, 0, 0, 0);
             ESP_LOGI(TAG, "FALL CLEAR (target lost)");
         }
         if (!valid) s_fall_last_us = now;   /* keep gap clock running */
@@ -419,8 +415,8 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
             if (mx - mn < 350 && motion_cnt >= 4) {
                 s_fall_state = RADAR_FALL_IDLE;
                 fall_reset();
-                events_push(AEVT_FALL_CLEAR, 0, 0);
-                mqtt_publish_event(MQTT_EVT_FALL_CLEAR, 0, 0, 0);
+                events_push_diag(AEVT_FALL_CLEAR, 0, 0, rbc,
+                                 (int16_t)(mx - mn), -1);
                 ESP_LOGI(TAG, "FALL CLEAR (upright, spread=%d)", mx - mn);
             }
         }
@@ -485,7 +481,8 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
                      spread, runs);
         } else if (fabsf(med - s_fall_med0) <= FALL_MED_DRIFT &&
                    now - s_fall_qual_us >= FALL_CONFIRM_MS * 1000LL) {
-            fall_fire((int16_t)(med / 10), ang, rbc);
+            fall_fire((int16_t)(med / 10), ang, rbc,
+                      (int16_t)spread, (int16_t)runs);
             return;
         } else if (fabsf(med - s_fall_med0) > FALL_MED_DRIFT) {
             /* clusters moving (pacing, not lying) — restart confirm */
@@ -864,8 +861,6 @@ static void radar_task(void *arg)
         still_fired = false;                                           \
         last_motion_us = now;    /* restart clock on ANY recovery */   \
         events_push(AEVT_STILL_RECOVER, (int16_t)t.azimuth_deg, 0);    \
-        mqtt_publish_event(MQTT_EVT_STILL_RECOVER, 0,                  \
-                           (int16_t)t.azimuth_deg, 0);                 \
         ESP_LOGI(TAG, "still alarm cleared (%s)", why);                \
     } while (0)
 
@@ -915,10 +910,8 @@ static void radar_task(void *arg)
             if (still_min > 0 && t.valid && !still_fired && !consumed_sound &&
                 now - last_motion_us >= (int64_t)still_min * 60 * 1000000LL) {
                 still_fired = true;
-                events_push(AEVT_STILL_ALARM, (int16_t)(t.range_mm / 10),
-                            (int16_t)t.azimuth_deg);
-                mqtt_publish_event(MQTT_EVT_STILL_ALARM, t.range_mm,
-                                   (int16_t)t.azimuth_deg, t.rb_conf);
+                events_push_diag(AEVT_STILL_ALARM, (int16_t)(t.range_mm / 10),
+                                 (int16_t)t.azimuth_deg, t.rb_conf, -1, -1);
                 ESP_LOGW(TAG, "STILL ALARM: no movement for %u min "
                          "(range=%ucm az=%.0f°)", still_min,
                          t.range_mm / 10, t.azimuth_deg);

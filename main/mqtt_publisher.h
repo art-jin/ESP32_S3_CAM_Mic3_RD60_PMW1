@@ -27,7 +27,8 @@ typedef enum {
     MQTT_EVT_FALL_CLEAR,
     MQTT_EVT_STILL_ALARM,
     MQTT_EVT_STILL_RECOVER,
-    /* MQTT_EVT_IN_BED_STILL reserved for P0-2 bed-zone suppression. */
+    /* Reserved enum slot for P0-2 bed-zone suppression (no producer yet). */
+    MQTT_EVT_IN_BED_STILL,
 } mqtt_event_type_t;
 
 /* One-time setup: queue + publisher task + IP-event hook. Connects and
@@ -39,11 +40,13 @@ void mqtt_publisher_init(void);
 bool mqtt_publish_event(mqtt_event_type_t type, uint32_t range_mm,
                         int16_t az_deg, uint8_t conf);
 
-/* Variant carrying one diagnostic metric (serialized as trailing
- * "spread_mm"; 0 = not applicable) — used by fall_suspect so the cloud
- * gets the ring spread that fired the detection (P0-2 tuning data). */
-bool mqtt_publish_event_full(mqtt_event_type_t type, uint32_t range_mm,
-                             int16_t az_deg, uint8_t conf, uint16_t spread_mm);
+/* Variant carrying fall-detector diagnostics, serialized as trailing
+ * optional fields ("spread_mm"/"runs", after the frozen field sequence,
+ * fall event types only; negative value ⇒ field omitted) — P0-2
+ * bed-zone calibration data. */
+bool mqtt_publish_event_diag(mqtt_event_type_t type, uint32_t range_mm,
+                             int16_t az_deg, uint8_t conf,
+                             int16_t spread_mm, int16_t runs);
 
 bool mqtt_publisher_is_connected(void);
 

@@ -7,6 +7,7 @@
 
 #include "events.h"
 #include "evlog.h"
+#include "mqtt_publisher.h"
 
 #define EV_RING_N 32
 
@@ -20,16 +21,36 @@ static SemaphoreHandle_t s_lock;
 /* NVS evlog mirror only for events that matter after a reboot:
  * link state, care alarms, out-of-range. Transient scene events
  * (enter/leave/assoc) stay RAM-only — they would evict crash forensics
- * from the 32-slot NVS ring for little diagnostic value. */
-static void mirror_to_evlog(uint8_t type, int16_t v1, int16_t v2)
+ * from the 32-slot NVS ring for little diagnostic value.
+ *
+ * The fall/still care types ALSO enqueue their MQTT publish here, in the
+ * same synchronous path as the evlog write (docs/52 P0-1 dev item 3): one
+ * event ⇒ both records, so evlog↔broker reconciliation can't see a
+ * half-emitted event. v1 is range_cm at the radar call sites. */
+static void mirror_to_evlog(uint8_t type, int16_t v1, int16_t v2,
+                            uint8_t conf, int16_t diag1, int16_t diag2)
 {
     switch (type) {
     case AEVT_RADAR_OFFLINE: evlog_record(EV_RADAR_DOWN, 0, v1); break;
     case AEVT_RADAR_ONLINE:  evlog_record(EV_RADAR_UP, 0, v1); break;
-    case AEVT_STILL_ALARM:   evlog_record(EV_STILL, 1, v1); break;
-    case AEVT_STILL_RECOVER: evlog_record(EV_STILL, 0, v1); break;
-    case AEVT_FALL_SUSPECT:  evlog_record(EV_FALL, 1, v1); break;
-    case AEVT_FALL_CLEAR:    evlog_record(EV_FALL, 0, v1); break;
+    case AEVT_STILL_ALARM:
+        evlog_record(EV_STILL, 1, v1);
+        mqtt_publish_event_diag(MQTT_EVT_STILL_ALARM,
+                                (uint32_t)v1 * 10, v2, conf, -1, -1);
+        break;
+    case AEVT_STILL_RECOVER:
+        evlog_record(EV_STILL, 0, v1);
+        mqtt_publish_event_diag(MQTT_EVT_STILL_RECOVER, 0, v1, 0, -1, -1);
+        break;
+    case AEVT_FALL_SUSPECT:
+        evlog_record(EV_FALL, 1, v1);
+        mqtt_publish_event_diag(MQTT_EVT_FALL_SUSPECT,
+                                (uint32_t)v1 * 10, v2, conf, diag1, diag2);
+        break;
+    case AEVT_FALL_CLEAR:
+        evlog_record(EV_FALL, 0, v1);
+        mqtt_publish_event_diag(MQTT_EVT_FALL_CLEAR, 0, 0, 0, diag1, diag2);
+        break;
     case AEVT_OOR:           evlog_record(EV_OOR, (uint8_t)v2, v1); break;
     default: break;
     }
@@ -45,6 +66,12 @@ void events_init(void)
 
 void events_push(uint8_t type, int16_t v1, int16_t v2)
 {
+    events_push_diag(type, v1, v2, 0, -1, -1);
+}
+
+void events_push_diag(uint8_t type, int16_t v1, int16_t v2, uint8_t conf,
+                      int16_t diag1, int16_t diag2)
+{
     if (!s_lock || type >= AEVT_TYPE_COUNT) return;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -57,7 +84,7 @@ void events_push(uint8_t type, int16_t v1, int16_t v2)
     s_head = (s_head + 1) % EV_RING_N;
     xSemaphoreGive(s_lock);
 
-    mirror_to_evlog(type, v1, v2);
+    mirror_to_evlog(type, v1, v2, conf, diag1, diag2);
 }
 
 int events_get(app_event_t *out, int max, uint32_t since, uint32_t *next)
