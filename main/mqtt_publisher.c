@@ -49,6 +49,8 @@ typedef struct {
     uint32_t range_mm;
     int16_t  az_deg;
     uint8_t  conf;
+    int16_t  spread_mm;   /* fall diag; <0 ⇒ field omitted */
+    int16_t  runs;        /* fall diag; <0 ⇒ field omitted */
 } neck_evt_t;
 
 static const char *evt_type_str(mqtt_event_type_t t)
@@ -58,8 +60,21 @@ static const char *evt_type_str(mqtt_event_type_t t)
     case MQTT_EVT_ZONE_LEAVE:   return "zone_leave";
     case MQTT_EVT_RADAR_ONLINE: return "radar_online";
     case MQTT_EVT_RADAR_OFFLINE:return "radar_offline";
+    case MQTT_EVT_FALL_SUSPECT: return "fall_suspect";
+    case MQTT_EVT_FALL_CLEAR:   return "fall_clear";
+    case MQTT_EVT_STILL_ALARM:  return "still_alarm";
+    case MQTT_EVT_STILL_RECOVER:return "still_recover";
+    case MQTT_EVT_IN_BED_STILL: return "in_bed_still";
     default:                    return "?";
     }
+}
+
+/* Payload contract (49 §4.3, frozen): field order boots..conf never
+ * changes; new data rides as extra fields appended after conf, and only
+ * for the event types it belongs to (fall diagnostics). */
+static bool evt_is_fall(mqtt_event_type_t t)
+{
+    return t == MQTT_EVT_FALL_SUSPECT || t == MQTT_EVT_FALL_CLEAR;
 }
 
 /* After this epoch we consider SNTP synced (fail-safe: unsynced ⇒ sec=0). */
@@ -112,7 +127,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
 static void publisher_task(void *arg)
 {
     neck_evt_t evt;
-    char payload[192];
+    char payload[224];
     char topic[80];
     while (true) {
         if (xQueueReceive(s_evtq, &evt, portMAX_DELAY) != pdTRUE) continue;
@@ -128,12 +143,19 @@ static void publisher_task(void *arg)
 
         int n = snprintf(payload, sizeof(payload),
             "{\"boots\":%lu,\"seq\":%lu,\"sec\":%lu,\"usec\":%lu,"
-            "\"type\":\"%s\",\"range_mm\":%lu,\"az_deg\":%d,\"conf\":%u}",
+            "\"type\":\"%s\",\"range_mm\":%lu,\"az_deg\":%d,\"conf\":%u",
             (unsigned long)evlog_get_boot_count(),
             (unsigned long)evt.seq,
             (unsigned long)evt.sec, (unsigned long)evt.usec,
             evt_type_str(evt.type),
             (unsigned long)evt.range_mm, evt.az_deg, evt.conf);
+        if (evt_is_fall(evt.type) && evt.spread_mm >= 0)
+            n += snprintf(payload + n, sizeof(payload) - n,
+                          ",\"spread_mm\":%d", evt.spread_mm);
+        if (evt_is_fall(evt.type) && evt.runs >= 0)
+            n += snprintf(payload + n, sizeof(payload) - n,
+                          ",\"runs\":%d", evt.runs);
+        n += snprintf(payload + n, sizeof(payload) - n, "}");
 
         snprintf(topic, sizeof(topic), "%s", s_topic_events);
         int msg_id = esp_mqtt_client_publish(s_client, topic, payload, n, 1, 0);
@@ -211,6 +233,13 @@ void mqtt_publisher_init(void)
 bool mqtt_publish_event(mqtt_event_type_t type, uint32_t range_mm,
                         int16_t az_deg, uint8_t conf)
 {
+    return mqtt_publish_event_diag(type, range_mm, az_deg, conf, -1, -1);
+}
+
+bool mqtt_publish_event_diag(mqtt_event_type_t type, uint32_t range_mm,
+                             int16_t az_deg, uint8_t conf,
+                             int16_t spread_mm, int16_t runs)
+{
     if (!s_evtq) return false;
 
     neck_evt_t evt = {
@@ -219,6 +248,8 @@ bool mqtt_publish_event(mqtt_event_type_t type, uint32_t range_mm,
         .range_mm = range_mm,
         .az_deg = az_deg,
         .conf = conf,
+        .spread_mm = spread_mm,
+        .runs = runs,
     };
     struct timeval tv;
     gettimeofday(&tv, NULL);

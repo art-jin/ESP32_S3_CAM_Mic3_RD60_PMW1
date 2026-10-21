@@ -103,3 +103,6 @@ main/wifi_creds.h
 
 # MQTT neck credentials (docs/48 Tier 1)
 main/mqtt_creds.h
+
+# versioned build dirs (idf.py -B)
+build-*/
