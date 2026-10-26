@@ -181,15 +181,28 @@ static void led_blink_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* ---- mDNS ---- */
+/* ---- mDNS ----
+ * docs/52 P0-6: anban-neck-<robot>.local, robot taken from the MQTT
+ * prefix's last segment (firmware identity, mqtt_creds.h). Falls back
+ * to the old mac-suffix name if the prefix is missing. */
+#include "mqtt_creds.h"
+
 static void mdns_start(void)
 {
     mdns_init();
-    uint8_t mac[6];
-    esp_wifi_get_mac(WIFI_IF_STA, mac);
-    snprintf(s_hostname, sizeof(s_hostname), "esp32-mic-%02x%02x", mac[4], mac[5]);
+    const char *robot = NULL;
+    const char *p = MQTT_ROBOT_PREFIX;
+    const char *slash = strrchr(p, '/');
+    robot = slash ? slash + 1 : p;
+    if (robot[0] == '\0') {
+        uint8_t mac[6];
+        esp_wifi_get_mac(WIFI_IF_STA, mac);
+        snprintf(s_hostname, sizeof(s_hostname), "esp32-mic-%02x%02x", mac[4], mac[5]);
+    } else {
+        snprintf(s_hostname, sizeof(s_hostname), "anban-neck-%s", robot);
+    }
     mdns_hostname_set(s_hostname);
-    mdns_instance_name_set("ESP32 Mic Array DOA");
+    mdns_instance_name_set("Anban neck (radar presence)");
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
     ESP_LOGI(TAG, "mDNS: http://%s.local", s_hostname);
 }

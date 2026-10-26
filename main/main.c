@@ -23,6 +23,7 @@
 #include "radar_probe.h"
 #include "zone_tracker.h"
 #include "mqtt_publisher.h"
+#include "cfg_channel.h"
 
 static const char *TAG = "main";
 
@@ -267,6 +268,10 @@ void app_main(void)
     /* docs/48 Tier 1: neck-event MQTT publisher — connects once WiFi has
      * an IP; never blocks radar/servo/REST (internal queue + own task). */
     mqtt_publisher_init();
+
+    /* docs/52 P0-6: cloud-side product-config downlink (cmd/cfg_set with
+     * status/cfg receipt). */
+    cfg_channel_init();
 
     /* 8 KB stack covers the FFT scratch (static) + libc math + ESP_LOG. */
     xTaskCreate(mic_task, "mic", 8192, NULL,

@@ -56,11 +56,13 @@
     #define USE_STATIC_IP       1
 
     /* Dual-slot WiFi failover tuning (see tasks/wifi-dual-network.md).
-     * RETRY_MAX: quick reconnect attempts on the SAME slot before rotating
-     *   (3 ≈ rides out transient drops, e.g. router reboot blips).
+     * RETRY_MAX: quick reconnect attempts on the SAME slot before rotating.
+     *   6 (docs/52 P0-6 T8): a full router power cycle ≈ 10-15s and each
+     *   NO_AP_FOUND attempt burns 2-3s — 3 retries rotated mid-bounce
+     *   (measured 2026-10-22); 6 keeps ~15-20s bounces on the same slot.
      * SWITCH_DELAY_MS: pause after rotating to the next slot before
      *   connecting (full no-network cycle ≈ 30s, avoids hammering the radio). */
-    #define WIFI_SLOT_RETRY_MAX       3
+    #define WIFI_SLOT_RETRY_MAX       6
     #define WIFI_SLOT_SWITCH_DELAY_MS 5000
 
     /* GPIO 10-15 (silkscreen "8"-"13") are FREE — previously reserved for the
