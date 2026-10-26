@@ -27,11 +27,12 @@
 #include "driver/uart.h"
 
 #include "radar_probe.h"
+#include "board_config.h"
 
 #define RP_UART_NUM   UART_NUM_1
 #define RP_BAUD       115200  /* module default; NOT the 921600 in the AT6010 doc */
-#define RP_TX_GPIO    8    /* ESP32 TX -> radar RX */
-#define RP_RX_GPIO    9    /* ESP32 RX <- radar TX */
+#define RP_TX_GPIO    RAD_TX_GPIO  /* ESP32 TX -> radar RX (board_config.h) */
+#define RP_RX_GPIO    RAD_RX_GPIO  /* ESP32 RX <- radar TX */
 #define RP_RX_BUF     4096
 #define RP_ACC_MAX    1024
 

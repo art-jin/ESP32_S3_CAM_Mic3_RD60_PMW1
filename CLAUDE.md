@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ESP32-S3-SuperMini + 3DMIC-291 three-mic array + **MS60-1211S80M 60GHz mmWave radar** + 1-channel PWM servo. Goal: combine the existing acoustic sound-source localization (DOA + servo tracking) with the radar's multi-target motion sensing — 声源定位与多目标运动状态探测.
 
-**Current status: SuperMini platform milestone closed at tag `v0.3.0-supermini-final` (2026-10-26) — 3DMic DOA + radar fusion servo tracking/pointing, fall detection (2026-09-09), MQTT care events (P0-1), zero-touch provisioning (P0-6); earlier tags `v0.1.0-radar-fusion` / `v0.2.0-visualizer`. Next: migrate to the ESP32-S3-CAM dev board and add e-ink display (墨水屏, EPD scaffold exists in the base project).** The mic-array + servo + REST-API stack was imported from the base project's working tree into `main/`; this project added: `radar.c` (5Hz 0x30 poll driver with offline auto-recovery + baud self-heal, stillness alarm, **fall-suspect detector** — bimodal range-oscillation signature, see protocol notes §11, and the config-request mailbox), `fusion.c` (sound↔target association + the optional association gate that blocks robot-speaker capture), `events.c` (scene-event ring), tracking sub-modes + OOR policy in `mode_manager`/`tracker`, the embedded visualization page (`main/index.html` served at `/`, EMBED_FILES — PPI scope, controls, radar config panel, experimental multi-target tracking, lying-posture badge), and REST endpoints (`/api/events`, `/api/radar(+/reset)`, extended `/api/status` + `/api/mode`). Pending: T9 regression, T10 24h soak, T5 physical OOR test, bed-zone suppression for bedside fall deployment (protocol notes §11 — lying-on-bed and lying-on-floor range clusters overlap). Read `ArthurReadMe.md` (requirements) first, then `tasks/prd-radar-audio-fusion.md` (PRD), `tasks/radar-protocol-notes.md` (measured facts and detector constants) and `tasks/visualizer-design.md` (page design).
+**Current status: SuperMini milestone closed at `v0.3.0-supermini-final` (2026-10-26, earlier tags `v0.1.0-radar-fusion` / `v0.2.0-visualizer`). CAM+EPD phase M1 IN PROGRESS (2026-10-26 evening): firmware runs on the GOOUUU S3-CAM board — mic array (DeviceID 3B61AI), WiFi/MQTT, servo boot sweep all verified; flash 2MB→16MB (N16R8 confirmed via esptool); the usbmodem21201 port auto-resets (no manual BOOT+RST needed). OPEN: radar offline on CAM — RX sees ~21 B/s stray noise, no valid frames; pending physical checks (camera FPC detached? radar common ground? radar-side TX/RX wire order). Then: sound-source tracking test (servo stayed in [sup] — normal until a stable target), M2 EPD port from ArtInk4.** The mic-array + servo + REST-API stack was imported from the base project's working tree into `main/`; this project added: `radar.c` (5Hz 0x30 poll driver with offline auto-recovery + baud self-heal, stillness alarm, **fall-suspect detector** — bimodal range-oscillation signature, see protocol notes §11, and the config-request mailbox), `fusion.c` (sound↔target association + the optional association gate that blocks robot-speaker capture), `events.c` (scene-event ring), tracking sub-modes + OOR policy in `mode_manager`/`tracker`, the embedded visualization page (`main/index.html` served at `/`, EMBED_FILES — PPI scope, controls, radar config panel, experimental multi-target tracking, lying-posture badge), and REST endpoints (`/api/events`, `/api/radar(+/reset)`, extended `/api/status` + `/api/mode`). Pending: T9 regression, T10 24h soak, T5 physical OOR test, bed-zone suppression for bedside fall deployment (protocol notes §11 — lying-on-bed and lying-on-floor range clusters overlap). Read `ArthurReadMe.md` (requirements) first, then `tasks/prd-radar-audio-fusion.md` (PRD), `tasks/radar-protocol-notes.md` (measured facts and detector constants) and `tasks/visualizer-design.md` (page design).
 
 **Bench workflow**: `tools/capture.py [秒] [正则]` — countdown banner + per-second timer + regex-filtered live tail over the USB serial; full log lands in `/tmp/capture_last.log`. Synchronized captures (user acts while the tool runs) are the standard way to validate detector changes.
 
@@ -36,6 +36,27 @@ Radar ↔ ESP32-S3-SuperMini (from `ArthurReadMe.md`):
 Mic array / servo / LED GPIO map for SuperMini (from base project's CLAUDE.md; no conflicts with radar pins 8/9/11): CLK0=3, DAT0=4, CLK1=5, DAT1=6, servo=7, LED=48.
 
 Bench wire colors (recorded 2026-10-19 re-wiring, TX/RX corrected same day after silent-radar debug): 3DMIC — CLK0/GPIO3=green, DAT0/GPIO4=blue, CLK1/GPIO5=purple, DAT1/GPIO6=gray, 3V3=red, GND=brown; servo signal (GPIO7)=orange/yellow. Radar — VCC=red, GND=black (both connectors), TX→GPIO9=white, RX→GPIO8=gray, OUT→GPIO10=orange/yellow (unused by firmware; docs table says GPIO11). Colors repeat across harnesses: gray = DAT1 & radar RX; orange/yellow = servo & radar OUT.
+
+**CAM-phase bench wiring (GOOUUU ESP32-S3-CAM, recorded 2026-10-26, supersedes the above for the CAM bench)** — prerequisites: camera FPC **detached** (EPD + radar pins sit in the camera zone 4–18), TF slot **never loaded** (servo GPIO38 shares the SD_CMD net with a 10K pull-up, base-project-proven):
+
+| Signal (harness color) | GPIO | Note |
+|---|---|---|
+| Mic CLK0 (blue) | 41 | |
+| Mic DAT0 (green) | 42 | |
+| Mic CLK1 (yellow) | 2 | |
+| Mic DAT1 (orange) | 1 | |
+| Servo | 38 | SD_CMD net; TF card forbidden |
+| Radar TX (orange) → ESP RX | 9 | same as SuperMini RAD_RX_GPIO |
+| Radar RX (yellow) ← ESP TX | 10 | was GPIO8 on SuperMini |
+| EPD SCK (brown) | 4 | camera zone |
+| EPD SDO/DIN (black) | 5 | camera zone |
+| EPD D/C (white) | 6 | camera zone |
+| EPD BUSY (gray) | 7 | camera zone |
+| EPD CS (green) | 15 | camera zone |
+| EPD RES (blue) | 16 | camera zone |
+| EPD BS (purple) | 17 | camera zone |
+
+Radar OUT1 stays unwired. Strapping pins (0/45/46) and the octal-PSRAM risk zone (35–37) stay unused; onboard LED is dropped (48 freed). Firmware deltas vs the SuperMini block: `RAD_TX_GPIO` 8→10, `RAD_RX_GPIO` stays 9, mic pins per table, LED disabled.
 
 **SuperMini pitfalls** (details in base CLAUDE.md):
 - Silkscreen numbers are offset +2 from actual GPIO numbers (silkscreen "N" = GPIO N+2)

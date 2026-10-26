@@ -1,8 +1,9 @@
 /* MS60-1211S80M radar driver — Phase 1.
  *
- * Link: UART1 115200 8N1, radar RX <- GPIO8 (our TX), radar TX -> GPIO9
- * (our RX). The AT6010 protocol doc claims a 921600 default; this module's
- * firmware actually ships 115200 (measured, tasks/radar-protocol-notes.md).
+ * Link: UART1 115200 8N1, ESP TX/RX pins from board_config.h
+ * (RAD_TX_GPIO/RAD_RX_GPIO). The AT6010 protocol doc claims a 921600
+ * default; this module's firmware actually ships 115200 (measured,
+ * tasks/radar-protocol-notes.md).
  *
  * Data path: poll 3.2.6 (cmd 0x30) at 5 Hz. Every reply carries the full
  * fmcw_det_info_t. No-target signature: det_result=0, range=0, conf=0
@@ -27,6 +28,7 @@
 #include "driver/uart.h"
 
 #include "radar.h"
+#include "board_config.h"
 #include "events.h"
 #include "mode_manager.h"
 #include "zone_tracker.h"
@@ -34,8 +36,7 @@
 
 #define RAD_UART_NUM    UART_NUM_1
 #define RAD_BAUD        115200
-#define RAD_TX_GPIO     8
-#define RAD_RX_GPIO     9
+/* RAD_TX/RX_GPIO come from board_config.h (differs per board) */
 #define RAD_RX_BUF      4096
 #define RAD_ACC_MAX     256
 

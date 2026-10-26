@@ -1,4 +1,4 @@
-# ESP32-S3-CAM + 3DMIC-291 partition table (2 MB flash)
+# ESP32-S3-CAM + 3DMIC-291 partition table
 #
 # Keep nvs at 0x9000 (matches IDF default) so existing device IDs survive
 # re-flash. coredump partition (64 KB) captures panic dumps for post-mortem
@@ -9,8 +9,10 @@
 # mbedtls X.509 + full CA bundle add ~150 KB. nvs offset untouched (device ID
 # survives); coredump moves later in flash — old dumps are lost on re-flash.
 #
-# Total: 24K (nvs) + 4K (phy) + 1536K (app) + 64K (coredump) = 1628 KB,
-# leaves ~400 KB spare on 2 MB flash.
+# 2026-10-26 (CAM migration M1): flash is now 16 MB (N16R8). Layout below
+# is unchanged — offsets identical to the 2 MB SuperMini build, so a
+# device re-flash keeps nvs. ~14 MB past coredump stays unallocated for
+# future EPD font/asset partitions.
 #
 # Name,   Type, SubType, Offset,  Size,     Flags
 nvs,      data, nvs,     0x9000,  0x6000,

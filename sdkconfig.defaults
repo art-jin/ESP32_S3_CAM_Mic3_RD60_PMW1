@@ -6,6 +6,12 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
+# GOOUUU ESP32-S3-CAM (WROOM-1 N16R8) has 16 MB flash — was 2 MB on
+# SuperMini. Spare space beyond partitions.csv is reserved for future
+# EPD font/asset partitions.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
 # Core dump to flash — survives reboot, readable via idf.py coredump-info.
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=

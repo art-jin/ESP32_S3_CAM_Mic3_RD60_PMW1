@@ -153,7 +153,9 @@ static void switch_timer_cb(TimerHandle_t timer)
     esp_wifi_connect();
 }
 
-/* ---- LED indicator ---- */
+/* ---- LED indicator ----
+ * Compiled out entirely when the board drops the LED (LED_GPIO < 0). */
+#if LED_GPIO >= 0
 static void led_init(void)
 {
     gpio_config_t io = {
@@ -180,6 +182,10 @@ static void led_blink_task(void *arg)
     }
     vTaskDelete(NULL);
 }
+#else
+static void led_init(void) {}
+static void led_set(bool on) { (void)on; }
+#endif
 
 /* ---- mDNS ----
  * docs/52 P0-6: anban-neck-<robot>.local, robot taken from the MQTT
@@ -266,8 +272,10 @@ esp_err_t wifi_init(void)
                                   pdFALSE /* one-shot */, NULL, switch_timer_cb);
 
     led_init();
+#if LED_GPIO >= 0
     /* Blink LED while connecting. */
     xTaskCreate(led_blink_task, "led_blink", 1024, NULL, 1, NULL);
+#endif
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
