@@ -124,21 +124,36 @@ static void ensure_buses(void)
     }
 }
 
-/* Two-phase wait: phase 1 waits for BUSY to drop (engagement, engage_ms,
- * real-time polling), phase 2 for the release (35 s cap). */
+/* ArtInk58 semantics for init resets: wait for BUSY release (LOW->HIGH),
+ * cap at cap_ms; instant pass if already idle. */
+static bool wait_release(int cap_ms)
+{
+    int ms = 0;
+    while (!read_busy()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        ms += 10;
+        if (ms > cap_ms) return false;
+    }
+    return true;
+}
+
+/* Two-phase refresh wait (ArtInk58-verified): LUT load + temperature
+ * conversion can delay the busy ASSERT by seconds — allow a 15 s engage
+ * window, then wait out the refresh (120 s cap for tri-color). */
 static bool wait_busy2(int engage_ms)
 {
     int us = 0;
     while (read_busy()) {                       /* HIGH = not busy yet */
         esp_rom_delay_us(500);
         us += 500;
+        if (us % 10000 == 0) vTaskDelay(pdMS_TO_TICKS(10));  /* feed IDLE/WDT */
         if (us > engage_ms * 1000) return false;   /* never engaged */
     }
     int ms = 0;
     while (!read_busy()) {                      /* LOW = busy */
         vTaskDelay(pdMS_TO_TICKS(10));
         ms += 10;
-        if (ms > 35000) {
+        if (ms > 120000) {
             s_busy_timeout = true;
             ESP_LOGE(TAG, "BUSY release timeout %d ms", ms);
             return false;
@@ -164,7 +179,7 @@ static void hw_reset(void)
 static bool start_update_and_wait(void)
 {
     send_cmd(0x12);               /* master update */
-    bool engaged = wait_busy2(2000);
+    bool engaged = wait_busy2(15000);
     evlog_record(EV_EPD, EPD_PHASE_UPDATE_ENGAGED, engaged ? 1 : 0);
     if (!engaged) vTaskDelay(pdMS_TO_TICKS(22000));   /* ~20 s refresh */
     return engaged;
@@ -183,7 +198,7 @@ bool epd_init(void)
 
     send_cmd(0x04);               /* power on */
     vTaskDelay(pdMS_TO_TICKS(100));
-    if (!wait_busy2(2000)) {
+    if (!wait_release(10000)) {
         ESP_LOGE(TAG, "PON no busy response — power/panel issue");
         evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, read_busy());
         return false;
@@ -276,7 +291,7 @@ static bool start_update_and_wait(void)
     send_cmd(0x22);                   /* OTP full refresh */
     send_data(0xF7);
     send_cmd(0x20);
-    bool engaged = wait_busy2(2000);
+    bool engaged = wait_busy2(15000);   /* assert may lag by seconds */
     evlog_record(EV_EPD, EPD_PHASE_UPDATE_ENGAGED, engaged ? 1 : 0);
     if (!engaged) vTaskDelay(pdMS_TO_TICKS(16000));   /* ~14 s refresh */
     return engaged;
@@ -292,7 +307,7 @@ bool epd_init(void)
     vTaskDelay(pdMS_TO_TICKS(100));   /* BUSY is unreliable right after reset */
 
     send_cmd(0x12);                   /* SW reset */
-    if (!wait_busy2(1000)) {
+    if (!wait_release(15000)) {
         ESP_LOGE(TAG, "no response to SW reset — check panel VCI/GND, "
                  "then SCK/SDA/CS wiring (BUSY=%d)", read_busy());
         evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, busy_raw);
@@ -323,7 +338,7 @@ bool epd_init(void)
     send_data(0x00);
     send_data(0x00);
 
-    bool ok = wait_busy2(1000);
+    bool ok = wait_release(15000);
     if (ok) {
         ESP_LOGI(TAG, "SSD1683 init done");
         evlog_record(EV_EPD, EPD_PHASE_INIT_OK, busy_raw);
@@ -420,11 +435,10 @@ bool epd_wiring_check(epd_wiring_t *out)
         esp_rom_delay_us(2000);
 #if defined(EPD_PANEL_5IN83)
     send_cmd(0x12);                  /* on UC8179 this is the update cmd */
-    if (!wait_busy2(2000)) out->cmd_reaction = false;
-    else out->cmd_reaction = true;
+    out->cmd_reaction = wait_busy2(15000);
 #else
     send_cmd(0x12);                  /* SSD1683 SW reset */
-    out->cmd_reaction = wait_busy2(1000);
+    out->cmd_reaction = wait_busy2(5000);
 #endif
     /* Drain the post-reset busy period so a later init starts clean. */
     for (int i = 0; i < 500 && read_busy() == 0; i++)
