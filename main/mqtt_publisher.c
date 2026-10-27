@@ -24,15 +24,17 @@ typedef struct {
     const char *username;
     const char *password;
     const char *robot_prefix;   /* e.g. "arthur139/redwolf" */
+    const char *expect_device_id;  /* NVS id of the board this block is for */
 } neck_creds_t;
 
 static const neck_creds_t *get_creds(void)
 {
     static const neck_creds_t c = {
-        .uri          = MQTT_BROKER_URI,
-        .username     = MQTT_USERNAME,
-        .password     = MQTT_PASSWORD,
-        .robot_prefix = MQTT_ROBOT_PREFIX,
+        .uri              = MQTT_BROKER_URI,
+        .username         = MQTT_USERNAME,
+        .password         = MQTT_PASSWORD,
+        .robot_prefix     = MQTT_ROBOT_PREFIX,
+        .expect_device_id = MQTT_EXPECT_DEVICE_ID,
     };
     return &c;
 }
@@ -207,6 +209,18 @@ static void on_ip_got(void *arg, esp_event_base_t base, int32_t id, void *data)
 void mqtt_publisher_init(void)
 {
     const neck_creds_t *c = get_creds();
+
+    /* Identity guard: creds blocks move between boards at flash time —
+     * refuse to publish under a robot's name from the wrong board, or a
+     * wrong ACTIVE block would silently pollute that robot's tree (this
+     * happened 2026-10-26: bench ran as heizai for a night). */
+    if (strcmp(g_device_id, c->expect_device_id) != 0) {
+        ESP_LOGE(TAG,
+                 "device ID mismatch: board \"%s\" != creds \"%s\" (user %s) "
+                 "— MQTT publisher DISABLED, nothing will be published",
+                 g_device_id, c->expect_device_id, c->username);
+        return;
+    }
 
     snprintf(s_topic_events, sizeof(s_topic_events), "%s/neck/events", c->robot_prefix);
     snprintf(s_topic_online, sizeof(s_topic_online), "%s/neck/state/online", c->robot_prefix);
