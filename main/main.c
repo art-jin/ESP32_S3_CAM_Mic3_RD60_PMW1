@@ -24,6 +24,7 @@
 #include "zone_tracker.h"
 #include "mqtt_publisher.h"
 #include "cfg_channel.h"
+#include "epd_task.h"
 
 static const char *TAG = "main";
 
@@ -272,6 +273,10 @@ void app_main(void)
     /* docs/52 P0-6: cloud-side product-config downlink (cmd/cfg_set with
      * status/cfg receipt). */
     cfg_channel_init();
+
+    /* M2: e-ink bring-up in its own low-priority task — init + clear +
+     * test pattern (~2x14 s), never blocks radar/mic/WiFi. */
+    epd_task_start();
 
     /* 8 KB stack covers the FFT scratch (static) + libc math + ESP_LOG. */
     xTaskCreate(mic_task, "mic", 8192, NULL,

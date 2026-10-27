@@ -40,6 +40,19 @@ enum {
     EV_STILL      = 11, /* flags=1=alarm/0=recover, value=range_cm */
     EV_OOR        = 12, /* flags=oor_policy id,   value=target_deg */
     EV_FALL       = 13, /* flags=1=suspect/0=clear, value=range_cm */
+    EV_EPD        = 14, /* flags=EPD_PHASE_*, see below */
+};
+
+/* EV_EPD phases (flags field) — bring-up visibility without serial console. */
+enum {
+    EPD_PHASE_INIT_OK    = 1,  /* value=BUSY level right after hw_reset */
+    EPD_PHASE_INIT_FAIL  = 2,  /* value=BUSY level at failure */
+    EPD_PHASE_CLEAR_DONE = 3,  /* value=duration ms */
+    EPD_PHASE_PAT_DONE   = 4,  /* value=duration ms */
+    EPD_PHASE_NO_HEAP    = 5,  /* value=0 */
+    EPD_PHASE_TASK_ALIVE = 6,  /* value=0 boot / 1 trigger-woken */
+    EPD_PHASE_UPDATE_ENGAGED = 7, /* value=1 panel pulled BUSY low after
+                                   * the update command (refresh started) */
 };
 
 /* Sources for EV_SERVO_CMD. */

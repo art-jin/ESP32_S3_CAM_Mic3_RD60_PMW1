@@ -56,6 +56,7 @@ const char *evlog_type_str(uint8_t type)
         case EV_STILL:       return "STILL";
         case EV_OOR:         return "OOR";
         case EV_FALL:        return "FALL";
+        case EV_EPD:         return "EPD";
         default:             return "?";
     }
 }
@@ -175,6 +176,18 @@ const char *evlog_flags_str(uint8_t type, uint8_t flags)
         static char s[4];
         snprintf(s, sizeof(s), "S%u", flags);
         return s;
+    }
+    if (type == EV_EPD) {
+        switch (flags) {
+            case EPD_PHASE_TASK_ALIVE: return "TASK_ALIVE";
+            case EPD_PHASE_INIT_OK:    return "INIT_OK";
+            case EPD_PHASE_INIT_FAIL:  return "INIT_FAIL";
+            case EPD_PHASE_CLEAR_DONE: return "CLEAR_DONE";
+            case EPD_PHASE_PAT_DONE:   return "PATTERN_DONE";
+            case EPD_PHASE_NO_HEAP:    return "NO_HEAP";
+            case EPD_PHASE_UPDATE_ENGAGED: return "UPDATE_ENGAGED";
+            default:                   return "?";
+        }
     }
     return NULL;
 }

@@ -17,6 +17,8 @@
 #include "events.h"
 #include "zone_tracker.h"
 #include "mqtt_publisher.h"
+#include "epd_task.h"
+#include "epd.h"
 
 static const char *TAG = "rest";
 static httpd_handle_t s_server = NULL;
@@ -651,6 +653,103 @@ static esp_err_t handler_radar_reset(httpd_req_t *req)
          "\"note\":\"re-applies sensing-on + distance gates\"}");
 }
 
+/* POST /api/epd/test?device_id=XXXX — re-run e-ink init + clear + tri-color
+ * test pattern (~30 s) on the parked EPD task. Bench bring-up helper: no
+ * reboot needed to see the EPD serial diagnostics. */
+static esp_err_t handler_epd_test(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    epd_task_test_trigger();
+    return send_json_ok(req,
+        "{\"ok\":true,\"triggered\":true,\"eta_s\":30,"
+        "\"note\":\"init+clear+test-pattern; watch EPD lines on serial\"}");
+}
+
+/* POST /api/epd/wiring?device_id=XXXX — panel wiring self-check (~2 s).
+ * Uses BUSY as the panel's feedback: RES pulse proves power+RES+BUSY,
+ * SW-reset command proves the SPI chain (SCK/SDO/CS/DC). */
+static esp_err_t handler_epd_wiring(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    epd_wiring_t w;
+    bool ok = epd_wiring_check(&w);
+    const char *verdict;
+    if (!w.busy_pullup)
+        verdict = "BUSY actively held LOW by the panel (wedged) — power-cycle "
+                  "the panel itself (reseat the 24-pin FPC) or replace it";
+    else if (w.busy_flips > 5)
+        verdict = "BUSY floating: BUSY wire broken or adapter unpowered";
+    else if (!w.reset_reaction)
+        verdict = "no reaction to reset: check VCI/GND power + RES + BUSY wires";
+    else if (!w.cmd_reaction)
+        verdict = "power/RES/BUSY ok; SPI chain broken: check SCK/SDA/CS/DC";
+    else
+        verdict = "wiring OK";
+    char buf[288];
+    snprintf(buf, sizeof(buf),
+        "{\"ok\":%s,\"busy_pullup\":%d,\"busy_flips\":%d,\"busy_idle\":%d,"
+        "\"reset_reaction\":%s,\"cmd_reaction\":%s,\"verdict\":\"%s\"}",
+        ok ? "true" : "false", w.busy_pullup, w.busy_flips, w.busy_idle_level,
+        w.reset_reaction ? "true" : "false", w.cmd_reaction ? "true" : "false",
+        verdict);
+    return send_json_ok(req, buf);
+}
+
+/* POST /api/epd/recover?device_id=XXXX — hard panel reset (100 ms RES low)
+ * for a stuck-busy panel; returns the BUSY level after recovery. */
+static esp_err_t handler_epd_recover(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    int busy = epd_deep_recovery();
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"busy_after\":%d,\"note\":\"%s\"}", busy,
+        busy ? "panel idle again — follow with /api/epd/test"
+             : "still low — panel needs a real VCI power cycle");
+    return send_json_ok(req, buf);
+}
+
+/* POST /api/epd/sweep?device_id=XXXX — wire-matrix sweep: pulse each EPD
+ * signal GPIO low and watch the others. A live panel answers a RES pulse
+ * with a BUSY drop; the reaction matrix reveals the true wiring. */
+static esp_err_t handler_epd_sweep(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    int reacts[7];
+    int best = epd_wire_sweep(reacts);
+    const int *pins = epd_pin_list();
+    static const char *names[7] =
+        { "SCK", "SDO", "DC", "BUSY", "CS", "RES", "BS" };
+    char buf[288];
+    int pos = snprintf(buf, sizeof(buf), "{\"ok\":true,\"reactions\":[");
+    for (int i = 0; i < 7 && pos < 240; i++) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "%s{\"%s\":%d,\"lows\":%d}",
+                        i ? "," : "", names[i], pins[i], reacts[i]);
+    }
+    snprintf(buf + pos, sizeof(buf) - pos,
+             "],\"best_watch\":\"%s\"}",
+             best >= 0 ? names[best] : "none — panel silent on all pins");
+    return send_json_ok(req, buf);
+}
+
+/* GET /api/epd/status?device_id=XXXX — snapshot of the last/ongoing e-ink
+ * selftest run (visibility without serial console / evlog ring). */
+static esp_err_t handler_epd_status(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    const epd_result_t *r = epd_last_result();
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"run_id\":%lu,\"running\":%s,\"init_ok\":%s,"
+        "\"clear_ms\":%d,\"pattern_ms\":%d,\"started_ms\":%ld,"
+        "\"hint\":\"short durations (<300ms) = panel did not engage the "
+        "refresh (power); init_ok=false = panel did not answer PON\"}",
+        (unsigned long)r->run_id, r->running ? "true" : "false",
+        r->init_ok ? "true" : "false", r->clear_ms, r->pat_ms,
+        (long)r->started_uptime_ms);
+    return send_json_ok(req, buf);
+}
+
 /* POST /api/point?device_id=XXXX
  * Body: {"dir":"7oc"} or {"angle":30}
  * Only works in COMMAND mode. Rate-limited to 1 per 500ms.
@@ -848,6 +947,21 @@ esp_err_t rest_api_start(void)
     static const httpd_uri_t uri_radar_reset = {
         .uri = "/api/radar/reset", .method = HTTP_POST, .handler = handler_radar_reset
     };
+    static const httpd_uri_t uri_epd_test = {
+        .uri = "/api/epd/test", .method = HTTP_POST, .handler = handler_epd_test
+    };
+    static const httpd_uri_t uri_epd_wiring = {
+        .uri = "/api/epd/wiring", .method = HTTP_POST, .handler = handler_epd_wiring
+    };
+    static const httpd_uri_t uri_epd_recover = {
+        .uri = "/api/epd/recover", .method = HTTP_POST, .handler = handler_epd_recover
+    };
+    static const httpd_uri_t uri_epd_status = {
+        .uri = "/api/epd/status", .method = HTTP_GET, .handler = handler_epd_status
+    };
+    static const httpd_uri_t uri_epd_sweep = {
+        .uri = "/api/epd/sweep", .method = HTTP_POST, .handler = handler_epd_sweep
+    };
     static const httpd_uri_t uri_point = {
         .uri = "/api/point", .method = HTTP_POST, .handler = handler_point
     };
@@ -867,10 +981,15 @@ esp_err_t rest_api_start(void)
     httpd_register_uri_handler(s_server, &uri_radar_get);
     httpd_register_uri_handler(s_server, &uri_radar_post);
     httpd_register_uri_handler(s_server, &uri_radar_reset);
+    httpd_register_uri_handler(s_server, &uri_epd_test);
+    httpd_register_uri_handler(s_server, &uri_epd_wiring);
+    httpd_register_uri_handler(s_server, &uri_epd_recover);
+    httpd_register_uri_handler(s_server, &uri_epd_status);
+    httpd_register_uri_handler(s_server, &uri_epd_sweep);
     httpd_register_uri_handler(s_server, &uri_point);
     httpd_register_uri_handler(s_server, &uri_shake);
     httpd_register_uri_handler(s_server, &uri_options);
 
-    ESP_LOGI(TAG, "REST API started: /api/ping /api/status /api/logs /api/events /api/mode /api/radar /api/radar/reset /api/point /api/shake");
+    ESP_LOGI(TAG, "REST API started: /api/ping /api/status /api/logs /api/events /api/mode /api/radar /api/radar/reset /api/epd/test /api/point /api/shake");
     return ESP_OK;
 }

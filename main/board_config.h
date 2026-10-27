@@ -35,6 +35,21 @@
     #define RAD_RX_GPIO         9    /* ESP RX <- radar TX */
     #define LED_GPIO            -1   /* dropped for the CAM phase; 48 free */
 
+    /* E-ink on the ORIGINAL GYSDISPLAY 24-pin adapter (reconnected
+     * 2026-10-27 evening; the v1.5 board was a detour). Wiring as first
+     * recorded: brown=SCK(4), black=SDO/DIN(5), white=D/C(6), gray=BUSY(7),
+     * green=CS(15), blue=RES(16), purple=BS(17, driven LOW = 4-wire SPI).
+     * Panel: 4.2" Hink-E042A48-A1 400x300 (SSD1683) — the default variant;
+     * define EPD_PANEL_5IN83 instead for the 5.83" FPC-8601B UC8179 panel. */
+    #define ENABLE_EPD          1
+    #define EPD_SCK_GPIO        4
+    #define EPD_SDO_GPIO        5    /* ESP MOSI -> adapter SDO/DIN */
+    #define EPD_DC_GPIO         6
+    #define EPD_BUSY_GPIO       7
+    #define EPD_CS_GPIO         15
+    #define EPD_RES_GPIO        16
+    #define EPD_BS_GPIO         17   /* driven LOW = 4-wire SPI */
+
 #elif defined(BOARD_WAVESHARE_S3_ZERO_M)
     /* Waveshare ESP32-S3-Zero + 3DMIC-291 + ZP10S (PWM mode, 15T/20T external gear) */
     #define MIC_CLK0_GPIO       1
@@ -68,6 +83,11 @@
 
 #if !defined(RAD_TX_GPIO) || !defined(RAD_RX_GPIO)
     #error "Board block must define RAD_TX_GPIO / RAD_RX_GPIO"
+#endif
+
+/* Boards without an e-ink panel: driver + task compile to no-ops. */
+#ifndef ENABLE_EPD
+#define ENABLE_EPD 0
 #endif
 
 /* Static IP — pinned so external callers can always reach this device at
