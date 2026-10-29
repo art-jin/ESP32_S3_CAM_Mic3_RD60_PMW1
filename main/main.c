@@ -24,6 +24,7 @@
 #include "zone_tracker.h"
 #include "mqtt_publisher.h"
 #include "cfg_channel.h"
+#include "display_mode.h"
 #include "epd_task.h"
 
 static const char *TAG = "main";
@@ -273,6 +274,9 @@ void app_main(void)
     /* docs/52 P0-6: cloud-side product-config downlink (cmd/cfg_set with
      * status/cfg receipt). */
     cfg_channel_init();
+
+    /* 74-M1: display channel (cmd/display → display_mode, REST 同构)。 */
+    display_mode_mqtt_init();
 
     /* M2: e-ink bring-up in its own low-priority task — init + clear +
      * test pattern (~2x14 s), never blocks radar/mic/WiFi. */

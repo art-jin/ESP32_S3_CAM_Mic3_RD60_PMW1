@@ -90,9 +90,11 @@ static uint32_t s_dropped;
 static char s_topic_events[64];
 static char s_topic_online[64];
 static char s_topic_cfg[64];
+static char s_topic_display[64];
 static char s_client_id[24];
 static bool s_started;
 static mqtt_cfg_cb_t s_cfg_cb;
+static mqtt_cfg_cb_t s_display_cb;   /* 74-M1 cmd/display,同签名 */
 
 extern char g_device_id[8];   /* main.c — 6-char NVS identity */
 
@@ -108,6 +110,8 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         esp_mqtt_client_publish(s_client, s_topic_online, "1", 1, 1, 1);
         /* docs/52 P0-6: cloud-side config downlink. */
         esp_mqtt_client_subscribe(s_client, s_topic_cfg, 1);
+        /* 74-M1:云端/机身刷屏下行通道。 */
+        esp_mqtt_client_subscribe(s_client, s_topic_display, 1);
         ESP_LOGI(TAG, "connected; online=1 published; cfg sub %s; "
                  "heap free=%u min=%u", s_topic_cfg,
                  (unsigned)esp_get_free_heap_size(),
@@ -118,7 +122,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGW(TAG, "disconnected");
         break;
     case MQTT_EVENT_DATA:
-        if (s_cfg_cb && e->topic && e->topic_len > 0 &&
+        if (e->topic && e->topic_len > 0 &&
             strncmp(e->topic, s_topic_cfg, e->topic_len) == 0 &&
             s_topic_cfg[e->topic_len] == '\0') {
             /* data is not null-terminated — copy to a stack buffer. */
@@ -127,7 +131,21 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                         ? e->data_len : (int)sizeof(buf) - 1;
             memcpy(buf, e->data, n);
             buf[n] = '\0';
-            s_cfg_cb(buf, n);
+            if (s_cfg_cb) s_cfg_cb(buf, n);
+        }
+        /* 74-M1:cmd/display 下行(载荷与 REST /api/display 同构,可达 1KB
+         * — medgrid 7 天)。堆拷贝避栈溢出。 */
+        if (s_display_cb && e->topic && e->topic_len > 0 &&
+            strncmp(e->topic, s_topic_display, e->topic_len) == 0 &&
+            s_topic_display[e->topic_len] == '\0') {
+            int len = e->data_len;
+            char *buf = malloc(len + 1);
+            if (buf) {
+                memcpy(buf, e->data, len);
+                buf[len] = '\0';
+                s_display_cb(buf, len);
+                free(buf);
+            }
         }
         break;
     case MQTT_EVENT_ERROR:
@@ -225,6 +243,7 @@ void mqtt_publisher_init(void)
     snprintf(s_topic_events, sizeof(s_topic_events), "%s/neck/events", c->robot_prefix);
     snprintf(s_topic_online, sizeof(s_topic_online), "%s/neck/state/online", c->robot_prefix);
     snprintf(s_topic_cfg, sizeof(s_topic_cfg), "%s/cmd/cfg_set", c->robot_prefix);
+    snprintf(s_topic_display, sizeof(s_topic_display), "%s/cmd/display", c->robot_prefix);
     snprintf(s_client_id, sizeof(s_client_id), "neck-%s",
              g_device_id[0] ? g_device_id : "esp32");
 
@@ -306,6 +325,8 @@ uint32_t mqtt_publisher_seq(void) { return s_seq; }
 uint32_t mqtt_publisher_dropped(void) { return s_dropped; }
 
 void mqtt_publisher_set_cfg_handler(mqtt_cfg_cb_t cb) { s_cfg_cb = cb; }
+
+void mqtt_publisher_set_display_handler(mqtt_cfg_cb_t cb) { s_display_cb = cb; }
 
 bool mqtt_publisher_publish_raw(const char *topic, const char *payload,
                                 int qos, int retain)

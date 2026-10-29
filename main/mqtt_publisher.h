@@ -62,6 +62,10 @@ uint32_t mqtt_publisher_dropped(void);
 typedef void (*mqtt_cfg_cb_t)(const char *payload, int len);
 void mqtt_publisher_set_cfg_handler(mqtt_cfg_cb_t cb);
 
+/* docs/74 M1: display channel — <prefix>/cmd/display 载荷与 REST
+ * /api/display 同构(§4 schema),转发给注册方(mqtt task 上回调)。 */
+void mqtt_publisher_set_display_handler(mqtt_cfg_cb_t cb);
+
 /* Fire-and-forget publish of an arbitrary topic/payload (thread-safe;
  * used for cfg receipts). Returns false when not connected. */
 bool mqtt_publisher_publish_raw(const char *topic, const char *payload,

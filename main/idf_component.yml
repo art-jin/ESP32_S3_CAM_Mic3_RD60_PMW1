@@ -1,5 +1,7 @@
 dependencies:
   espressif/mdns: "^1.2.0"
+  ## 74-M1: json 也被 v6.0 移出核心;cJSON 解析 display 载荷
+  espressif/cjson: "^1.7.2"
   ## esp_mqtt was removed from IDF core components in v6.0. The component
   ## registry's geo-CDN 403s from this network, so the mqtt component is
   ## vendored from IDF v5.5.2's core into components/mqtt/ (same upstream).

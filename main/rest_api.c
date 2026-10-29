@@ -12,6 +12,7 @@
 #include "status.h"
 #include "servo.h"
 #include "doa.h"
+#include "display_mode.h"
 #include "evlog.h"
 #include "radar.h"
 #include "fusion.h"
@@ -54,6 +55,8 @@ static const struct {
 #define N_DIR  (sizeof(s_dir_map) / sizeof(s_dir_map[0]))
 
 #define MAX_BODY_LEN 128
+/* 74-M1:/api/display 载荷上限与 display_mode 一致(medgrid 7 天 ~1KB)。 */
+#define DISPLAY_BODY_LEN (DISPLAY_PAYLOAD_MAX + 1)
 
 /* ---- CORS + error helpers ---- */
 static void set_cors(httpd_req_t *req)
@@ -162,6 +165,55 @@ static bool json_get_int(const char *body, const char *key, int *out)
 static esp_err_t handler_ping(httpd_req_t *req)
 {
     return send_json_ok(req, "{\"ok\":true}");
+}
+
+/* 74-M1 显示框架:POST /api/display?device_id=X(docs/74 §4 同构载荷)。
+ * {"mode":"weather|todo|status|medgrid|msg|calendar|calendar_overlay",
+ *  "ttl_sec":90, ...mode 专属字段} — 与 MQTT cmd/display 完全同构,
+ *  汇聚到 display_mode_show。 */
+static esp_err_t handler_display_post(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+
+    static char body[DISPLAY_BODY_LEN];   /* 静态:1KB 栈太重 */
+    if (!read_body(req, body, sizeof(body))) return ESP_OK;
+
+    char mode_str[24] = {0};
+    if (!json_get_str(body, "mode", mode_str, sizeof(mode_str))) {
+        return send_error(req, 400, "bad_request", "missing 'mode'");
+    }
+    int mode = display_mode_from_name(mode_str);
+    if (mode < 0) {
+        return send_error(req, 400, "bad_mode", "unknown display mode");
+    }
+    int ttl = 0;
+    json_get_int(body, "ttl_sec", &ttl);
+
+    if (!display_mode_show(mode, body, ttl)) {
+        return send_error(req, 500, "show_failed", "display_mode_show");
+    }
+    char resp[128];
+    int64_t remain = display_mode_ttl_remaining_ms();
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"mode\":\"%s\",\"ttl_remaining_sec\":%ld,\"seq\":%lu}",
+             display_mode_name(mode),
+             remain < 0 ? -1L : (long)(remain / 1000),
+             (unsigned long)display_mode_seq());
+    return send_json_ok(req, resp);
+}
+
+/* GET /api/display — 当前生效模式(调试/对账)。 */
+static esp_err_t handler_display_get(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    char resp[128];
+    int64_t remain = display_mode_ttl_remaining_ms();
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"mode\":\"%s\",\"ttl_remaining_sec\":%ld,\"seq\":%lu}",
+             display_mode_name(display_mode_active()),
+             remain < 0 ? -1L : (long)(remain / 1000),
+             (unsigned long)display_mode_seq());
+    return send_json_ok(req, resp);
 }
 
 /* P-A (docs/73 §4.3): 本 boot 的复位原因 — 掉线=整机重启后, curl
@@ -961,6 +1013,12 @@ esp_err_t rest_api_start(void)
     static const httpd_uri_t uri_events = {
         .uri = "/api/events", .method = HTTP_GET, .handler = handler_events
     };
+    static const httpd_uri_t uri_display_post = {
+        .uri = "/api/display", .method = HTTP_POST, .handler = handler_display_post
+    };
+    static const httpd_uri_t uri_display_get = {
+        .uri = "/api/display", .method = HTTP_GET, .handler = handler_display_get
+    };
     static const httpd_uri_t uri_mode = {
         .uri = "/api/mode", .method = HTTP_POST, .handler = handler_mode
     };
@@ -1003,6 +1061,8 @@ esp_err_t rest_api_start(void)
     httpd_register_uri_handler(s_server, &uri_status);
     httpd_register_uri_handler(s_server, &uri_logs);
     httpd_register_uri_handler(s_server, &uri_events);
+    httpd_register_uri_handler(s_server, &uri_display_post);
+    httpd_register_uri_handler(s_server, &uri_display_get);
     httpd_register_uri_handler(s_server, &uri_mode);
     httpd_register_uri_handler(s_server, &uri_radar_get);
     httpd_register_uri_handler(s_server, &uri_radar_post);

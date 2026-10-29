@@ -1,14 +1,15 @@
-/* epd_task.c — e-ink page owner (M3): lunar calendar ported from ArtInk58.
- * Boot: init panel -> wait for NTP time -> render calendar. Then re-render
- * on date rollover (hourly check); /api/epd/test shows the bench tri-color
- * card, after which the calendar returns. */
+/* epd_task.c — e-ink page owner.74-M1:模式框架 — 默认月历,display_mode
+ * (REST /api/display | MQTT cmd/display)可切临时页,TTL 到期回月历;
+ * /api/epd/test 调试三色卡不变。 */
 #include "epd_task.h"
 #include "board_config.h"
 
 #if ENABLE_EPD
 
+#include "display_mode.h"
 #include "epd.h"
 #include "epd_calendar.h"
+#include "epd_pages.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "evlog.h"
@@ -108,38 +109,46 @@ static void epd_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 
+    display_mode_set_notify_task(xTaskGetCurrentTaskHandle());
+
     int shown_day = -1;
+    int last_mode = -1;
+    uint32_t last_seq = 0;
     for (;;) {
-        int64_t t0 = esp_timer_get_time();
-        epd_calendar_render(bw, red);
-        epd_display(bw, red);
-        s_result.clear_ms = (int)((esp_timer_get_time() - t0) / 1000);
-        evlog_record(EV_EPD, EPD_PHASE_CLEAR_DONE, (int16_t)s_result.clear_ms);
-        ESP_LOGI(TAG, "calendar rendered (%d ms)", s_result.clear_ms);
-        shown_day = day_key();
+        /* 74-M1:渲染生效模式(月历=TTL 回退目标;临时页到期自动回)。 */
+        int mode = display_mode_active();
+        uint32_t seq = display_mode_seq();
+        if (mode != last_mode || seq != last_seq ||
+            (mode == DMODE_CALENDAR && day_key() != shown_day)) {
+            int64_t t0 = esp_timer_get_time();
+            epd_pages_render(mode, display_mode_payload(), bw, red);
+            epd_display(bw, red);
+            s_result.clear_ms = (int)((esp_timer_get_time() - t0) / 1000);
+            evlog_record(EV_EPD, EPD_PHASE_CLEAR_DONE, (int16_t)s_result.clear_ms);
+            ESP_LOGI(TAG, "page %s rendered (%d ms)",
+                     display_mode_name(mode), s_result.clear_ms);
+            last_mode = mode;
+            last_seq = seq;
+            shown_day = day_key();
+        }
         s_result.running = false;
 
-        /* Park up to 1 h: re-render on date rollover or notify. */
-        for (;;) {
-            uint32_t val = 0;
-            if (xTaskNotifyWait(0, 0xFFFFFFFF, &val,
-                                pdMS_TO_TICKS(3600 * 1000)) == pdTRUE) {
-                s_result.running = true;
-                if (val == NOTIFY_TEST_PATTERN) {
-                    t0 = esp_timer_get_time();
-                    draw_test_pattern(bw, red);
-                    epd_display(bw, red);
-                    s_result.pat_ms = (int)((esp_timer_get_time() - t0) / 1000);
-                    evlog_record(EV_EPD, EPD_PHASE_PAT_DONE,
-                                 (int16_t)s_result.pat_ms);
-                }
-                break;   /* calendar re-renders next outer iteration */
-            }
-            if (day_key() != shown_day) {
-                ESP_LOGI(TAG, "date rolled over — re-rendering calendar");
-                s_result.running = true;
-                break;
-            }
+        /* Park:min(TTL 剩余, 1h) — 到点重查(过期回退/日期翻转/通知)。 */
+        TickType_t wait = pdMS_TO_TICKS(3600 * 1000);
+        int64_t remain = display_mode_ttl_remaining_ms();
+        if (remain >= 0 && remain < 3600 * 1000)
+            wait = pdMS_TO_TICKS((remain > 0 ? remain : 0) + 100);
+
+        uint32_t val = 0;
+        if (xTaskNotifyWait(0, 0xFFFFFFFF, &val, wait) == pdTRUE &&
+            val == NOTIFY_TEST_PATTERN) {
+            s_result.running = true;
+            int64_t t0 = esp_timer_get_time();
+            draw_test_pattern(bw, red);
+            epd_display(bw, red);
+            s_result.pat_ms = (int)((esp_timer_get_time() - t0) / 1000);
+            evlog_record(EV_EPD, EPD_PHASE_PAT_DONE, (int16_t)s_result.pat_ms);
+            last_mode = -1;   /* 强制下一轮重渲染生效页 */
         }
     }
 }
