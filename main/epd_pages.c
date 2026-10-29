@@ -23,6 +23,7 @@
 #include "freertos/task.h"
 
 #include "evlog.h"
+#include "mode_manager.h"
 #include "mqtt_publisher.h"
 #include "radar.h"
 #include "status.h"
@@ -317,41 +318,239 @@ static void render_lines_from_json(uint8_t *bw, uint8_t *red,
     draw_lines_page(bw, red, title, lines, n, hero_index);
 }
 
-/* ---- 状态页(含 3D 麦克风阵列) ---- */
+/* ---- 状态页 v3:卡片表驱动,2×4 自适应网格(8 卡含舵机) ---- */
+
+static void card_icon_clock(int cx, int cy)
+{
+    for (int a = 0; a < 360; a += 6)
+        fill_rect(cx + 9 * __builtin_cos(a * 3.14159 / 180),
+                  cy + 9 * __builtin_sin(a * 3.14159 / 180),
+                  cx + 9 * __builtin_cos(a * 3.14159 / 180) + 1,
+                  cy + 9 * __builtin_sin(a * 3.14159 / 180) + 1, CLR_BLACK);
+    fill_rect(cx, cy, cx + 5, cy + 1, CLR_BLACK);
+    fill_rect(cx, cy, cx, cy - 5, CLR_BLACK);
+}
+
+static void card_icon_mic(int cx, int cy)
+{
+    fill_rect(cx - 3, cy - 8, cx + 3, cy + 1, CLR_BLACK);
+    fill_rect(cx - 6, cy + 1, cx + 6, cy + 2, CLR_BLACK);
+    fill_rect(cx, cy + 3, cx + 1, cy + 5, CLR_BLACK);
+    fill_rect(cx - 3, cy + 6, cx + 3, cy + 7, CLR_BLACK);
+}
+
+static void card_icon_wifi(int cx, int cy)
+{
+    for (int ring = 1; ring <= 3; ring++) {
+        int r = ring * 4;
+        for (int a = 200; a <= 340; a += 10)
+            fill_rect(cx + r * __builtin_cos(a * 3.14159 / 180),
+                      cy - r * __builtin_sin(a * 3.14159 / 180),
+                      cx + r * __builtin_cos(a * 3.14159 / 180) + 1,
+                      cy - r * __builtin_sin(a * 3.14159 / 180) + 1, CLR_BLACK);
+    }
+    fill_rect(cx - 1, cy - 1, cx + 1, cy + 1, CLR_BLACK);
+}
+
+static void card_icon_cloud(int cx, int cy)
+{
+    draw_icon_cloud(cx, cy, 22, CLR_BLACK);
+}
+
+static void card_icon_radar(int cx, int cy)
+{
+    for (int ring = 1; ring <= 2; ring++) {
+        int r = ring * 5;
+        for (int a = 0; a <= 90; a += 12)
+            fill_rect(cx + r * __builtin_cos(a * 3.14159 / 180),
+                      cy - r * __builtin_sin(a * 3.14159 / 180),
+                      cx + r * __builtin_cos(a * 3.14159 / 180) + 1,
+                      cy - r * __builtin_sin(a * 3.14159 / 180) + 1, CLR_BLACK);
+    }
+    fill_rect(cx, cy, cx + 7, cy - 5, CLR_BLACK);
+    fill_rect(cx - 1, cy - 1, cx + 1, cy + 1, CLR_RED);
+}
+
+static void card_icon_servo(int cx, int cy)
+{
+    frame_rect(cx - 7, cy - 3, cx + 7, cy + 9, CLR_BLACK, 2);
+    for (int a = 0; a < 360; a += 8)
+        fill_rect(cx + 3 * __builtin_cos(a * 3.14159 / 180),
+                  cy - 7 + 3 * __builtin_sin(a * 3.14159 / 180),
+                  cx + 3 * __builtin_cos(a * 3.14159 / 180) + 1,
+                  cy - 7 + 3 * __builtin_sin(a * 3.14159 / 180) + 1, CLR_BLACK);
+    fill_rect(cx, cy - 7, cx + 8, cy - 6, CLR_RED);   /* 输出轴臂 */
+}
+
+static void card_icon_chip(int cx, int cy)
+{
+    frame_rect(cx - 6, cy - 5, cx + 6, cy + 5, CLR_BLACK, 2);
+    fill_rect(cx - 2, cy - 1, cx + 2, cy + 1, CLR_BLACK);
+    for (int i = -4; i <= 4; i += 4) {
+        fill_rect(cx + i, cy - 8, cx + i + 1, cy - 6, CLR_BLACK);
+        fill_rect(cx + i, cy + 6, cx + i + 1, cy + 8, CLR_BLACK);
+    }
+}
+
+static void card_icon_info(int cx, int cy)
+{
+    for (int a = 0; a < 360; a += 8)
+        fill_rect(cx + 8 * __builtin_cos(a * 3.14159 / 180),
+                  cy + 8 * __builtin_sin(a * 3.14159 / 180),
+                  cx + 8 * __builtin_cos(a * 3.14159 / 180) + 1,
+                  cy + 8 * __builtin_sin(a * 3.14159 / 180) + 1, CLR_BLACK);
+    fill_rect(cx, cy - 3, cx + 1, cy + 2, CLR_BLACK);
+    fill_rect(cx, cy + 4, cx + 1, cy + 5, CLR_BLACK);
+}
+
+/* 卡片内容描述(表驱动) */
+typedef struct {
+    void (*icon)(int, int);
+    const char *label;
+    char value[40];
+    char sub[48];
+    bool alarm;
+} status_card_t;
+
+static void draw_card(u8g2_font_t *font, int x0, int y0, int w, int h,
+                      const status_card_t *c)
+{
+    if (c->alarm) frame_rect(x0, y0, x0 + w - 1, y0 + h - 1, CLR_RED, 4);
+    else          frame_rect(x0, y0, x0 + w - 1, y0 + h - 1, CLR_BLACK, 2);
+    c->icon(x0 + w / 2, y0 + 22);
+
+    u8g2_SetBackgroundColor(font, U_WHITE);
+    u8g2_SetFontMode(font, 1);
+    u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
+    u8g2_SetForegroundColor(font, U_BLACK);
+    draw_text(font, x0 + (w - text_w(font, c->label, 1)) / 2,
+              y0 + 48, c->label, 1);
+    /* 数值:按 '-' 切段组装行(每行 ≤13 半角字符,最多 3 行;12px 红字)。
+     * 用户实例: v0.3.0- / supermini-final- / 95-g292c935 三行(10-29 裁决)。 */
+    u8g2_SetForegroundColor(font, U_RED);
+    u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
+    char vlines[3][24];
+    int nv = 0;
+    {
+        const char *p = c->value;
+        vlines[0][0] = vlines[1][0] = vlines[2][0] = '\0';
+        while (*p && nv < 3) {
+            const char *dash = strchr(p, '-');
+            size_t seg = dash ? (size_t)(dash - p + 1) : strlen(p);
+            if (strlen(vlines[nv]) + seg > 13 && vlines[nv][0]) {
+                if (++nv >= 3) break;
+            }
+            strncat(vlines[nv], p, seg);
+            p += seg;
+        }
+        if (nv == 0) nv = 1;
+    }
+    if (strlen(vlines[0]) <= 13 && !vlines[1][0]) {
+        u8g2_SetFont(font, u8g2_font_wqy16_t_gb2312a);
+        int vw = text_w(font, c->value, 1);
+        if (vw > w - 10) {
+            u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
+            vw = text_w(font, c->value, 1);
+        }
+        draw_text(font, x0 + (w - vw) / 2, y0 + h - 30, c->value, 1);
+    } else {
+        int ybase = y0 + h - 16 - 15 * (nv);
+        for (int i = 0; i <= nv && i < 3; i++) {
+            if (!vlines[i][0]) break;
+            int lw = text_w(font, vlines[i], 1);
+            draw_text(font, x0 + (w - lw) / 2, ybase + i * 15, vlines[i], 1);
+        }
+    }
+    u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
+    u8g2_SetForegroundColor(font, U_BLACK);
+    draw_text(font, x0 + (w - text_w(font, c->sub, 1)) / 2,
+              y0 + h - 10, c->sub, 1);
+}
 
 static void render_status(uint8_t *bw, uint8_t *red)
 {
-    static char rows[10][96];
-    static char title[48];
-    const char *lines[10];
-    int n = 0;
+    memset(bw, 0xFF, EPD_BUF_SIZE);
+    memset(red, 0x00, EPD_BUF_SIZE);
+    g_bw = bw; g_red = red;
+
+    u8g2_font_t font;
+    memset(&font, 0, sizeof(font));
+    font.draw_hv_line = u8g2_draw_hv_line;
+    extern char g_device_id[8];              /* main.c NVS 身份 */
+    char stitle[40];
+    snprintf(stitle, sizeof(stitle), "设备状态 · %s", g_device_id);
+    draw_title_bar(&font, stitle);
 
     device_status_t st;
     status_get(&st);
-
     const esp_app_desc_t *app = esp_app_get_description();
-    snprintf(rows[n++], 96, "版本  %s", app->version);
-    snprintf(rows[n++], 96, "启动  第 %lu 次 · 运行 %ld 分钟",
-             (unsigned long)evlog_get_boot_count(),
-             (long)(esp_timer_get_time() / 1000 / 60000));
-    snprintf(rows[n++], 96, "3D麦克风  %s · 置信 %.2f · 方位 %+.0f°",
-             st.confidence > 0.30 ? "阵列正常" : "环境安静",
-             st.confidence, st.azimuth);
-    snprintf(rows[n++], 96, "WiFi  %s · %s",
-             st.wifi_connected ? "已连接" : "断开",
-             st.ip[0] ? st.ip : "-");
-    snprintf(rows[n++], 96, "MQTT  %s · 事件 %lu",
-             mqtt_publisher_is_connected() ? "在线" : "离线",
-             (unsigned long)mqtt_publisher_seq());
-    snprintf(rows[n++], 96, "雷达  %s · 伺服 %+.0f°",
-             radar_is_online() ? "在线" : "离线", st.servo_angle);
-    snprintf(rows[n++], 96, "内存  %u KB 空闲",
-             (unsigned)(xPortGetFreeHeapSize() / 1024));
 
-    snprintf(title, 48, "设备状态");
-    for (int i = 0; i < n; i++) lines[i] = rows[i];
-    draw_lines_page(bw, red, title, lines, n, -1);
+    status_card_t cards[8];
+    memset(cards, 0, sizeof(cards));
+
+    cards[0].icon = card_icon_clock;
+    cards[0].label = "运行";
+    snprintf(cards[0].value, 40, "%ld 分",
+             (long)(esp_timer_get_time() / 1000 / 60000));
+    snprintf(cards[0].sub, 48, "第 %lu 次启动",
+             (unsigned long)evlog_get_boot_count());
+
+    cards[1].icon = card_icon_mic;
+    cards[1].label = "3D麦克风";
+    snprintf(cards[1].value, 40, "%.0f%%", st.confidence * 100);
+    snprintf(cards[1].sub, 48, "方位 %+.0f°", st.azimuth);
+
+    cards[2].icon = card_icon_wifi;
+    cards[2].label = "WiFi";
+    snprintf(cards[2].value, 40, "%s",
+             st.wifi_connected ? "已连接" : "断开");
+    snprintf(cards[2].sub, 48, "%s", st.ip[0] ? st.ip : "-");
+    cards[2].alarm = !st.wifi_connected;
+
+    cards[3].icon = card_icon_cloud;
+    cards[3].label = "MQTT";
+    snprintf(cards[3].value, 40, "%s",
+             mqtt_publisher_is_connected() ? "在线" : "离线");
+    snprintf(cards[3].sub, 48, "事件 %lu",
+             (unsigned long)mqtt_publisher_seq());
+    cards[3].alarm = !mqtt_publisher_is_connected();
+
+    cards[4].icon = card_icon_radar;
+    cards[4].label = "雷达";
+    snprintf(cards[4].value, 40, "%s", radar_is_online() ? "在线" : "离线");
+    snprintf(cards[4].sub, 48, "检测 %s",
+             mode_manager_get_fall_detect() ? "开" : "关");
+    cards[4].alarm = !radar_is_online();
+
+    cards[5].icon = card_icon_servo;
+    cards[5].label = "舵机";
+    snprintf(cards[5].value, 40, "%+.0f°", st.servo_angle);
+    snprintf(cards[5].sub, 48, "%s", st.servo_moving ? "转动中" : "静止");
+
+    cards[6].icon = card_icon_chip;
+    cards[6].label = "内存";
+    snprintf(cards[6].value, 40, "%u KB",
+             (unsigned)(xPortGetFreeHeapSize() / 1024));
+    snprintf(cards[6].sub, 48, "低水位 %u KB",
+             (unsigned)(xPortGetMinimumEverFreeHeapSize() / 1024));
+
+    cards[7].icon = card_icon_info;
+    cards[7].label = "固件";
+    snprintf(cards[7].value, 40, "%s", app->version);
+    snprintf(cards[7].sub, 48, "脖颈 RD60");
+
+    int top = TITLE_H + 5;
+    int gap = 5;
+    int cols = 4, rows = 2;                    /* 8 卡 → 2×4 自适应 */
+    int cw = (EPD_WIDTH - 12 - gap * (cols - 1)) / cols;
+    int ch = (EPD_HEIGHT - top - 6 - gap * (rows - 1)) / rows;
+    for (int i = 0; i < 8; i++) {
+        int r = i / cols, c = i % cols;
+        draw_card(&font, 6 + c * (cw + gap), top + r * (ch + gap),
+                  cw, ch, &cards[i]);
+    }
 }
+
 
 /* ---- 药盒格 medgrid:格内早/中/晚 + 底部图例 ---- */
 
