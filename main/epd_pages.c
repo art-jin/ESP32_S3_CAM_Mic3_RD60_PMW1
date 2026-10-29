@@ -1,7 +1,10 @@
-/* epd_pages.c — docs/74 M1 模式渲染器。
- * 像素/字体原语与 epd_calendar.c 同款(set_pixel/fill_rect/u8g2 桥),
- * 刻意各留一份静态拷贝:月历页是已验收代码,不动它。
- * 布局全部由 EPD_WIDTH/HEIGHT 推导,4.2/5.83 吋同源(74 §7)。 */
+/* epd_pages.c — docs/74 M1 模式渲染器(排版升级版,用户 10-29 裁决:
+ * 大字/图标/图例/3D麦状态)。
+ * - 文本:wqy16 全量(16px),标题与天气主信息 2x 像素放大(32px)
+ * - 天气页:图标(晴/云/雨 原语绘制,关键词匹配)+大字主行
+ * - 药格:格内 早/中/晚(实心格反白),底部图例(黑=已服 红=漏服 空=待服)
+ * - 状态页:含 3D 麦克风阵列状态
+ * 像素/字体原语与 epd_calendar.c 同款,刻意各留一份静态拷贝。 */
 #include "epd_pages.h"
 #include "display_mode.h"
 #include "epd.h"
@@ -32,8 +35,12 @@
 #define U_WHITE  0xFFFF
 
 static uint8_t *g_bw, *g_red;
+/* 放大绘制:v3 修正 — 缩放只作用于字形像素,原点 (g_ox,g_oy) 不缩放。
+ * (旧实现把坐标一起乘,2x 文字实际画到 y*2 处出界=全裁空) */
+static int g_scale = 1;
+static int g_ox = 0, g_oy = 0;
 
-/* ---- 像素/文本原语(epd_calendar.c 同款) ---- */
+/* ---- 像素/文本原语 ---- */
 
 static void set_pixel(int x, int y, int color)
 {
@@ -67,10 +74,14 @@ static void u8g2_draw_hv_line(u8g2_font_t *u, int16_t x, int16_t y,
 {
     int c = (color == U_RED) ? CLR_RED
           : (color == U_WHITE) ? CLR_WHITE : CLR_BLACK;
-    for (int i = 0; i < len; i++) {
-        if (dir == 0) set_pixel(x + i, y, c);
-        else          set_pixel(x, y + i, c);
-    }
+    for (int i = 0; i < len; i++)
+        for (int dy = 0; dy < g_scale; dy++)
+            for (int dx = 0; dx < g_scale; dx++) {
+                /* 字形空间 (x+i,y) → 画布 (g_ox+(x+i)*s, g_oy+y*s)+块内偏移 */
+                int px = g_ox + (int)(dir == 0 ? x + i : x) * g_scale + dx;
+                int py = g_oy + (int)(dir == 0 ? y : y + i) * g_scale + dy;
+                set_pixel(px, py, c);
+            }
 }
 
 static uint16_t utf8_next(const char **s)
@@ -87,40 +98,105 @@ static uint16_t utf8_next(const char **s)
     return cp;
 }
 
-static int16_t draw_utf8(u8g2_font_t *font, int16_t x, int16_t y, const char *s)
+/* 放大绘制:font 的每个逻辑像素画 scale×scale 块(g_scale 全局)。 */
+static int16_t draw_text(u8g2_font_t *font, int16_t x, int16_t y,
+                         const char *s, int scale)
 {
+    g_ox = x; g_oy = y; g_scale = scale;
+    int16_t fx = 0, fy = 0;   /* 字形空间局部坐标(相对原点) */
     while (*s) {
         uint16_t cp = utf8_next(&s);
-        x += u8g2_DrawGlyph(font, x, y, cp);
+        fx += u8g2_DrawGlyph(font, fx, fy, cp);
     }
-    return x;
+    g_scale = 1;
+    return x + fx * scale;
 }
 
-static int16_t utf8_width(u8g2_font_t *font, const char *s)
+static int text_w(u8g2_font_t *font, const char *s, int scale)
 {
+    g_scale = 1;
     int16_t w = 0;
     while (*s) {
         uint16_t cp = utf8_next(&s);
         w += u8g2_GetGlyphWidth(font, cp);
     }
-    return w;
+    return w * scale;
 }
 
-/* ---- 文本页:weather / msg / todo 共用(title + 行列表) ---- */
+/* ---- 天气图标(原语绘制,关键词选择) ---- */
+
+static void draw_icon_sun(int cx, int cy, int r, int color)
+{
+    for (int a = 0; a < 360; a += 4)
+        fill_rect(cx + r * 0.66 * __builtin_cos(a * 3.14159 / 180) - 1,
+                  cy + r * 0.66 * __builtin_sin(a * 3.14159 / 180) - 1,
+                  cx + r * 0.66 * __builtin_cos(a * 3.14159 / 180) + 1,
+                  cy + r * 0.66 * __builtin_sin(a * 3.14159 / 180) + 1, color);
+    for (int a = 0; a < 360; a += 45) {
+        double c = __builtin_cos(a * 3.14159 / 180), s = __builtin_sin(a * 3.14159 / 180);
+        fill_rect(cx + r * 0.85 * c, cy + r * 0.85 * s,
+                  cx + r * 1.25 * c, cy + r * 1.25 * s, color);
+    }
+}
+
+static void draw_icon_cloud(int cx, int cy, int w, int color)
+{
+    int r = w / 5;
+    fill_rect(cx - w / 2 + r, cy, cx + w / 2 - r, cy + r, color);
+    for (int dx = -w / 2 + 2 * r; dx <= w / 2 - 2 * r; dx += r)
+        for (int a = 0; a < 360; a += 6)
+            fill_rect(cx + dx + r * 0.7 * __builtin_cos(a * 3.14159 / 180),
+                      cy + r * 0.7 * __builtin_sin(a * 3.14159 / 180),
+                      cx + dx + r * 0.7 * __builtin_cos(a * 3.14159 / 180) + 1,
+                      cy + r * 0.7 * __builtin_sin(a * 3.14159 / 180) + 1, color);
+}
+
+static void draw_weather_icon(const char *cond, int cx, int cy)
+{
+    if (strstr(cond, "雨")) {
+        draw_icon_cloud(cx, cy - 18, 72, CLR_BLACK);
+        for (int i = -1; i <= 1; i++)
+            fill_rect(cx + i * 16, cy + 2, cx + i * 16 + 5, cy + 18, CLR_RED);
+    } else if (strstr(cond, "雪")) {
+        draw_icon_cloud(cx, cy - 18, 72, CLR_BLACK);
+        for (int i = -1; i <= 1; i++)
+            fill_rect(cx + i * 16, cy + 6, cx + i * 16 + 4, cy + 10, CLR_RED);
+    } else if (strstr(cond, "云") || strstr(cond, "阴")) {
+        draw_icon_cloud(cx, cy - 8, 80, CLR_BLACK);
+    } else {   /* 晴(默认) */
+        draw_icon_sun(cx, cy, 26, CLR_RED);
+    }
+}
+
+/* ---- 文本页骨架 ---- */
+
+#define TITLE_H      38   /* 用户裁决:窄栏 */
+#define TITLE_SCALE  1    /* 反白 16px 标题(黑底白字已够醒目) */
+#define BODY_SCALE   1
+#define LINE_H       34
 
 static void draw_title_bar(u8g2_font_t *font, const char *title)
 {
-    int h = (EPD_HEIGHT >= 400) ? 34 : 26;
-    fill_rect(0, 0, EPD_WIDTH - 1, h - 1, CLR_BLACK);
-    u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
+    fill_rect(0, 0, EPD_WIDTH - 1, TITLE_H - 1, CLR_BLACK);
+    u8g2_SetFont(font, u8g2_font_wqy16_t_gb2312a);
     u8g2_SetFontMode(font, 1);
     u8g2_SetForegroundColor(font, U_WHITE);
-    draw_utf8(font, 10, h - (EPD_HEIGHT >= 400 ? 10 : 8), title);
+    draw_text(font, 12, TITLE_H - 9, title, TITLE_SCALE);
+}
+
+static void draw_body(u8g2_font_t *font, int x, int y, const char *s,
+                      int scale, int red)
+{
+    u8g2_SetFont(font, u8g2_font_wqy16_t_gb2312a);
+    u8g2_SetFontMode(font, 1);
+    u8g2_SetBackgroundColor(font, U_WHITE);
+    u8g2_SetForegroundColor(font, red ? U_RED : U_BLACK);
+    draw_text(font, x, y, s, scale);
 }
 
 static void draw_lines_page(uint8_t *bw, uint8_t *red,
                             const char *title, const char *const *lines,
-                            int n_lines)
+                            int n_lines, int hero_index)
 {
     memset(bw, 0xFF, EPD_BUF_SIZE);
     memset(red, 0x00, EPD_BUF_SIZE);
@@ -132,101 +208,152 @@ static void draw_lines_page(uint8_t *bw, uint8_t *red,
 
     draw_title_bar(&font, title);
 
-    u8g2_SetFont(&font, u8g2_font_wqy12_t_gb2312a);
-    u8g2_SetFontMode(&font, 1);
-    u8g2_SetBackgroundColor(&font, U_WHITE);
-
-    int line_h = (EPD_HEIGHT >= 400) ? 26 : 22;
-    int y = (EPD_HEIGHT >= 400 ? 34 : 26) + line_h;
-    for (int i = 0; i < n_lines && y < EPD_HEIGHT - 6; i++) {
-        u8g2_SetForegroundColor(&font, U_BLACK);
-        /* 简单截断(不折行)— 载荷侧负责行宽 */
+    int y = TITLE_H + LINE_H;
+    for (int i = 0; i < n_lines && y < EPD_HEIGHT - 8; i++) {
         char buf[96];
         strncpy(buf, lines[i], sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
-        draw_utf8(&font, 12, y, buf);
-        y += line_h;
+        if (i == hero_index) {
+            draw_body(&font, 14, y + 8, buf, 2, 1);   /* 2x 红色主信息 */
+            y += 56;
+        } else {
+            draw_body(&font, 14, y, buf, BODY_SCALE, 0);
+            y += LINE_H;
+        }
     }
 }
 
-static void render_lines_from_json(uint8_t *bw, uint8_t *red,
-                                   const char *payload, const char *mode_name,
-                                   const char *items_key)
+/* 从 JSON 抽 lines[](或 items[]→行)进静态行缓冲 */
+static int json_lines(const char *payload, const char *mode_name,
+                      const char *items_key, char title[48],
+                      char rows[12][96])
 {
-    const char *lines[12];
     int n = 0;
-    char title[48] = "";
-
+    title[0] = '\0';
     cJSON *root = cJSON_Parse(payload);
     if (root) {
         cJSON *obj = cJSON_GetObjectItem(root, mode_name);
         if (obj) {
             cJSON *t = cJSON_GetObjectItem(obj, "title");
             if (cJSON_IsString(t))
-                snprintf(title, sizeof(title), "%s", t->valuestring);
+                snprintf(title, 48, "%s", t->valuestring);
         }
-        /* weather/msg: lines[];todo: items[] → "HH:MM 文本 [✓]" */
         const char *key = items_key ? items_key : "lines";
         cJSON *arr = cJSON_GetObjectItem(obj ? obj : root, key);
         if (cJSON_IsArray(arr)) {
             cJSON *it;
             cJSON_ArrayForEach(it, arr) {
                 if (n >= 12) break;
-                static char row[12][96];
                 if (cJSON_IsString(it)) {
-                    snprintf(row[n], 96, "%s", it->valuestring);
+                    snprintf(rows[n], 96, "%s", it->valuestring);
                 } else if (cJSON_IsObject(it)) {
                     cJSON *tm = cJSON_GetObjectItem(it, "time");
                     cJSON *tx = cJSON_GetObjectItem(it, "text");
                     cJSON *dn = cJSON_GetObjectItem(it, "done");
-                    snprintf(row[n], 96, "%s %s%s",
+                    snprintf(rows[n], 96, "%s %s%s",
                              cJSON_IsString(tm) ? tm->valuestring : "  ",
                              cJSON_IsString(tx) ? tx->valuestring : "",
-                             cJSON_IsTrue(dn) ? " [✓]" : "");
+                             cJSON_IsTrue(dn) ? " [已毕]" : "");
                 } else continue;
-                lines[n] = row[n];
                 n++;
             }
         }
         cJSON_Delete(root);
     }
-    if (!title[0]) snprintf(title, sizeof(title), "%s", mode_name);
-    if (n == 0) { lines[n++] = "(无内容)"; }
-    draw_lines_page(bw, red, title, lines, n);
+    if (!title[0]) snprintf(title, 48, "%s", mode_name);
+    return n;
 }
 
-/* ---- 状态页:本地自渲染(74 §4: status 为 null) ---- */
+static void render_lines_from_json(uint8_t *bw, uint8_t *red,
+                                   const char *payload, const char *mode_name,
+                                   const char *items_key, int hero_index)
+{
+    static char rows[12][96];
+    static char title[48];
+    const char *lines[12];
+    int n = json_lines(payload, mode_name, items_key, title, rows);
+    if (n == 0) strcpy(rows[n++], "(无内容)");
+    for (int i = 0; i < n; i++) lines[i] = rows[i];
+
+    /* 天气页专用排版 v3:图标居中上区,主信息(2x红)整行居中于图标下,
+     * 分隔线后为明细行 — 任何行宽都不会出界。 */
+    if (hero_index >= 0 && mode_name[0] == 'w' && n > 0) {
+        memset(bw, 0xFF, EPD_BUF_SIZE);
+        memset(red, 0x00, EPD_BUF_SIZE);
+        g_bw = bw; g_red = red;
+        u8g2_font_t font;
+        memset(&font, 0, sizeof(font));
+        font.draw_hv_line = u8g2_draw_hv_line;
+        draw_title_bar(&font, title);
+
+        draw_weather_icon(rows[0], EPD_WIDTH / 2, TITLE_H + 52);
+
+        char cond[40];
+        strncpy(cond, rows[0], sizeof(cond) - 1);
+        cond[sizeof(cond) - 1] = 0;
+        /* UTF-8 安全截到 12 字(2x 居中行宽上限) */
+        int cnt = 0;
+        char *p = cond;
+        while (*p && cnt < 12) { p += (*p & 0x80) ? 3 : 1; cnt++; }
+        *p = 0;
+
+        int hero_scale = 2;
+        int hw = text_w(&font, cond, hero_scale);
+        if (hw > EPD_WIDTH - 24) hero_scale = 1;
+        hw = text_w(&font, cond, hero_scale);
+        draw_body(&font, (EPD_WIDTH - hw) / 2, TITLE_H + 148, cond,
+                  hero_scale, 1);
+
+        int div_y = TITLE_H + 162;
+        fill_rect(10, div_y, EPD_WIDTH - 10, div_y + 1, CLR_BLACK);
+
+        int y = div_y + 32;
+        for (int i = 1; i < n && y < EPD_HEIGHT - 10; i++) {
+            draw_body(&font, 14, y, rows[i], BODY_SCALE, 0);
+            y += LINE_H;
+        }
+        return;
+    }
+    draw_lines_page(bw, red, title, lines, n, hero_index);
+}
+
+/* ---- 状态页(含 3D 麦克风阵列) ---- */
 
 static void render_status(uint8_t *bw, uint8_t *red)
 {
-    char l[10][96];
+    static char rows[10][96];
+    static char title[48];
+    const char *lines[10];
     int n = 0;
 
     device_status_t st;
     status_get(&st);
 
     const esp_app_desc_t *app = esp_app_get_description();
-    snprintf(l[n++], 96, "版本  %s", app->version);
-    snprintf(l[n++], 96, "启动   第 %lu 次 · 运行 %ld 分钟",
+    snprintf(rows[n++], 96, "版本  %s", app->version);
+    snprintf(rows[n++], 96, "启动  第 %lu 次 · 运行 %ld 分钟",
              (unsigned long)evlog_get_boot_count(),
              (long)(esp_timer_get_time() / 1000 / 60000));
-    snprintf(l[n++], 96, "WiFi   %s · %s",
+    snprintf(rows[n++], 96, "3D麦克风  %s · 置信 %.2f · 方位 %+.0f°",
+             st.confidence > 0.30 ? "阵列正常" : "环境安静",
+             st.confidence, st.azimuth);
+    snprintf(rows[n++], 96, "WiFi  %s · %s",
              st.wifi_connected ? "已连接" : "断开",
              st.ip[0] ? st.ip : "-");
-    snprintf(l[n++], 96, "MQTT   %s · 事件序号 %lu",
+    snprintf(rows[n++], 96, "MQTT  %s · 事件 %lu",
              mqtt_publisher_is_connected() ? "在线" : "离线",
              (unsigned long)mqtt_publisher_seq());
-    snprintf(l[n++], 96, "雷达   %s · 伺服 %+.0f°",
+    snprintf(rows[n++], 96, "雷达  %s · 伺服 %+.0f°",
              radar_is_online() ? "在线" : "离线", st.servo_angle);
-    snprintf(l[n++], 96, "内存   %u KB 空闲",
+    snprintf(rows[n++], 96, "内存  %u KB 空闲",
              (unsigned)(xPortGetFreeHeapSize() / 1024));
 
-    const char *lines[10];
-    for (int i = 0; i < n; i++) lines[i] = l[i];
-    draw_lines_page(bw, red, "设备状态", lines, n);
+    snprintf(title, 48, "设备状态");
+    for (int i = 0; i < n; i++) lines[i] = rows[i];
+    draw_lines_page(bw, red, title, lines, n, -1);
 }
 
-/* ---- 药盒格 medgrid:3 行 × 7 天 ---- */
+/* ---- 药盒格 medgrid:格内早/中/晚 + 底部图例 ---- */
 
 static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
 {
@@ -247,12 +374,13 @@ static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
     cJSON *today = cJSON_IsObject(grid) ? cJSON_GetObjectItem(grid, "today_idx") : NULL;
     int today_idx = cJSON_IsNumber(today) ? today->valueint : -1;
 
-    int top = (EPD_HEIGHT >= 400) ? 40 : 30;
-    int bottom = EPD_HEIGHT - 6;
+    static const char *slot_name[3] = {"早", "中", "晚"};
+    int legend_h = 24;
+    int top = TITLE_H + 20;
+    int bottom = EPD_HEIGHT - legend_h - 4;
     int left = 6, right = EPD_WIDTH - 6;
     int colw = (right - left) / 7;
-    int grid_h = bottom - top - 16;
-    int rowh = grid_h / 3;
+    int rowh = (bottom - top - 14) / 3;
 
     for (int d = 0; d < 7; d++) {
         int cx0 = left + d * colw;
@@ -271,25 +399,49 @@ static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
                 }
         }
         /* 日期标签 */
-        u8g2_SetFont(&font, u8g2_font_wqy9_t_lunar);
+        u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
         u8g2_SetFontMode(&font, 1);
         u8g2_SetForegroundColor(&font, (d == today_idx) ? U_RED : U_BLACK);
-        draw_utf8(&font, cx0 + 4, top + 11, date);
-        /* 3 格:taken=实心黑 missed=实心红 pending=空心黑 */
+        draw_text(&font, cx0 + 4, top + 14, date, 1);
+
         for (int s = 0; s < 3; s++) {
-            int y0 = top + 16 + s * rowh;
-            int x0 = cx0 + 5, x1 = cx0 + colw - 6, y1 = y0 + rowh - 4;
+            int x0 = cx0 + 5, x1 = cx0 + colw - 6;
+            int y0 = top + 18 + s * rowh, y1 = y0 + rowh - 5;
+            int fg = CLR_WHITE, bg = CLR_WHITE;
             if (strcmp(slots[s], "taken") == 0) {
-                fill_rect(x0, y0, x1, y1, CLR_BLACK);
+                fill_rect(x0, y0, x1, y1, CLR_BLACK); bg = CLR_BLACK;
             } else if (strcmp(slots[s], "missed") == 0) {
-                fill_rect(x0, y0, x1, y1, CLR_RED);
+                fill_rect(x0, y0, x1, y1, CLR_RED); bg = CLR_RED;
             } else {
-                frame_rect(x0, y0, x1, y1, CLR_BLACK, 2);
+                frame_rect(x0, y0, x1, y1, CLR_BLACK, 2); bg = CLR_WHITE;
             }
+            (void)bg;
+            /* 格内早/中/晚:实心格反白 */
+            u8g2_SetForegroundColor(&font,
+                (bg == CLR_WHITE) ? U_BLACK : U_WHITE);
+            int tw = text_w(&font, slot_name[s], 1);
+            int cell_cx = (x0 + x1) / 2, cell_cy = (y0 + y1) / 2;
+            draw_text(&font, cell_cx - tw / (2 * 1), cell_cy + 7,
+                      slot_name[s], 1);
         }
         /* 今天整列红框高亮 */
         if (d == today_idx)
-            frame_rect(cx0 + 2, top + 13, cx0 + colw - 3, bottom - 2, CLR_RED, 3);
+            frame_rect(cx0 + 2, top + 15, cx0 + colw - 3, bottom - 2, CLR_RED, 3);
+    }
+
+    /* 底部图例:■已服(黑) ■漏服(红) □待服(空心) */
+    int ly = EPD_HEIGHT - legend_h - 2;
+    int lx = 10;
+    static const char *legend[] = {"已服", "漏服", "待服"};
+    int lcolor[] = {CLR_BLACK, CLR_RED, CLR_WHITE};
+    u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
+    for (int i = 0; i < 3; i++) {
+        if (lcolor[i] == CLR_WHITE) frame_rect(lx, ly, lx + 13, ly + 13, CLR_BLACK, 2);
+        else fill_rect(lx, ly, lx + 13, ly + 13, lcolor[i]);
+        u8g2_SetFontMode(&font, 1);
+        u8g2_SetForegroundColor(&font, U_BLACK);
+        draw_text(&font, lx + 18, ly + 13, legend[i], 1);
+        lx += 18 + text_w(&font, legend[i], 1) + 22;
     }
     if (root) cJSON_Delete(root);
 }
@@ -306,7 +458,6 @@ static int day_of_week(int y, int m, int d)
 static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
                                     const char *payload)
 {
-    /* 先画标准月历(已验收路径),再按同一布局公式补 overlay 标记 */
     epd_calendar_render(bw, red);
     g_bw = bw; g_red = red;
 
@@ -320,7 +471,6 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
     localtime_r(&now, &tm_now);
     int year = tm_now.tm_year + 1900, month = tm_now.tm_mon + 1;
 
-    /* 与 epd_calendar.c draw_month_days 同一套几何 */
     bool large = (EPD_HEIGHT >= 400);
     int margin = 6;
     int wh_y = large ? 44 : 32;
@@ -336,7 +486,6 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
     int rowh = (EPD_HEIGHT - wh_y - wh_h - 4) / nrows;
     int sq = large ? 34 : 30;
 
-    /* todo_days:细红框(框住日期方块,不遮数字) */
     cJSON *td = cJSON_GetObjectItem(ov, "todo_days");
     if (cJSON_IsArray(td)) {
         cJSON *it;
@@ -351,7 +500,6 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
                        cx + sq / 2 + 3, cy + sq / 2 + 5, CLR_RED, 2);
         }
     }
-    /* holidays:红色小方块(日格右上角) */
     cJSON *hol = cJSON_GetObjectItem(ov, "holidays");
     if (cJSON_IsArray(hol)) {
         cJSON *it;
@@ -363,8 +511,10 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
             int col = (fw + day - 1) % 7, row = (fw + day - 1) / 7;
             int cx = margin + col * colw + colw / 2;
             int cy = wh_y + wh_h + row * rowh + rowh / 2;
-            fill_rect(cx + sq / 2 - 4, cy - sq / 2 - 4,
-                      cx + sq / 2 + 2, cy - sq / 2 + 2, CLR_RED);
+            /* 节假日 = 细黑框(对齐 KinCal 灰度框语义;三色屏以黑代灰,
+             * 与待办红框靠颜色区分) — 用户裁决 10-29 */
+            frame_rect(cx - sq / 2 - 1, cy - sq / 2 - 3,
+                       cx + sq / 2 + 1, cy + sq / 2 + 3, CLR_BLACK, 2);
         }
     }
     cJSON_Delete(root);
@@ -384,13 +534,13 @@ void epd_pages_render(int mode, const char *payload_json,
         render_calendar_overlay(bw, red, payload);
         break;
     case DMODE_WEATHER:
-        render_lines_from_json(bw, red, payload, "weather", NULL);
+        render_lines_from_json(bw, red, payload, "weather", NULL, 0);
         break;
     case DMODE_MSG:
-        render_lines_from_json(bw, red, payload, "msg", NULL);
+        render_lines_from_json(bw, red, payload, "msg", NULL, 0);
         break;
     case DMODE_TODO:
-        render_lines_from_json(bw, red, payload, "todo", "items");
+        render_lines_from_json(bw, red, payload, "todo", "items", -1);
         break;
     case DMODE_STATUS:
         render_status(bw, red);
