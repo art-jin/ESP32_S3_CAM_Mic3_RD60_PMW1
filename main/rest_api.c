@@ -989,7 +989,7 @@ esp_err_t rest_api_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 6144;
-    config.max_uri_handlers = 16;   /* 12 registered; over-limit handlers fail silently */
+    config.max_uri_handlers = 24;   /* 19 registered (M1 +2); over-limit handlers fail silently */
     config.task_priority = configMAX_PRIORITIES - 5;
 
     esp_err_t err = httpd_start(&s_server, &config);
