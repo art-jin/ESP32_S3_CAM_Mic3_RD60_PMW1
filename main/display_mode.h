@@ -21,14 +21,22 @@ enum {
 
 #define DISPLAY_PAYLOAD_MAX 1024
 #define DISPLAY_TTL_DEFAULT_SEC 90
+/* 用户裁决(10-29):非月历内容页至少维持 90s — 全刷本身 ~14s,短 TTL
+ * 页面刚上屏就过期回刷,观感是"闪一下就没了"。 */
+#define DISPLAY_TTL_MIN_SEC 90
 
 int         display_mode_from_name(const char *name);
 const char *display_mode_name(int mode);
 
 /* 请求切换模式。payload_json 为完整原始 JSON(可为 NULL → "{}")。
  * ttl_sec<=0 → 90s 默认。返回 false = 未知模式。
- * 线程安全(REST task / MQTT task / EPD task 三方)。 */
+ * **TTL 自上屏完成起算**(EPD 全刷 ~14s,自请求起算会把短页刚刷上
+ * 就过期):show() 置 pending,EPD 渲染完成回调 display_mode_rendered()
+ * 才开始倒计时。线程安全(REST/MQTT/EPD 三方)。 */
 bool display_mode_show(int mode, const char *payload_json, int ttl_sec);
+
+/* EPD task:某模式上屏完成后调用 — 启动其 TTL 倒计时。 */
+void display_mode_rendered(int mode);
 
 /* 生效模式(TTL 过期自动回 DMODE_CALENDAR)。 */
 int         display_mode_active(void);
@@ -36,7 +44,7 @@ int         display_mode_active(void);
 const char *display_mode_payload(void);
 /* 每次 show 自增 — EPD task 用 (mode,seq) 变更检测。 */
 uint32_t    display_mode_seq(void);
-/* 当前临时页剩余毫秒;默认页返回 -1。 */
+/* 当前临时页剩余毫秒;默认页返回 -1。pending(未上屏)返回 ttl 请求值。 */
 int64_t     display_mode_ttl_remaining_ms(void);
 
 /* EPD task 启动时注册自己,show() 通过 notify 唤醒渲染。 */

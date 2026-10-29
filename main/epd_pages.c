@@ -112,7 +112,7 @@ static void draw_title_bar(u8g2_font_t *font, const char *title)
 {
     int h = (EPD_HEIGHT >= 400) ? 34 : 26;
     fill_rect(0, 0, EPD_WIDTH - 1, h - 1, CLR_BLACK);
-    u8g2_SetFont(font, u8g2_font_wqy12_t_lunar);
+    u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
     u8g2_SetFontMode(font, 1);
     u8g2_SetForegroundColor(font, U_WHITE);
     draw_utf8(font, 10, h - (EPD_HEIGHT >= 400 ? 10 : 8), title);
@@ -132,7 +132,7 @@ static void draw_lines_page(uint8_t *bw, uint8_t *red,
 
     draw_title_bar(&font, title);
 
-    u8g2_SetFont(&font, u8g2_font_wqy12_t_lunar);
+    u8g2_SetFont(&font, u8g2_font_wqy12_t_gb2312a);
     u8g2_SetFontMode(&font, 1);
     u8g2_SetBackgroundColor(&font, U_WHITE);
 
@@ -323,7 +323,6 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
     /* 与 epd_calendar.c draw_month_days 同一套几何 */
     bool large = (EPD_HEIGHT >= 400);
     int margin = 6;
-    int cell_w = (EPD_WIDTH - margin * 2) / 7;
     int wh_y = large ? 44 : 32;
     int wh_h = large ? 30 : 22;
     int dim = 31;

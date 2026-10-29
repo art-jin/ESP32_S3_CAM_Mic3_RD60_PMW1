@@ -25,6 +25,11 @@ enum { WHITE = 0, BLACK, RED };
 
 #define NOTIFY_TEST_PATTERN 1u
 
+/* 用户裁决(10-29):切换需等待 — 两次全刷之间的最小间隔。该面板有
+ * BUSY 卡死前科(M2 "panel died" + 今日 120s timeout 实录),连刷会把它
+ * 推进卡死态;新请求在间隔内先排队(到点重查,新 seq 自然优先)。 */
+#define EPD_MIN_REFRESH_GAP_MS 30000
+
 static TaskHandle_t s_epd_task;
 static epd_result_t s_result;   /* latest run snapshot, read by REST */
 
@@ -114,16 +119,28 @@ static void epd_task(void *arg)
     int shown_day = -1;
     int last_mode = -1;
     uint32_t last_seq = 0;
+    int64_t last_refresh_ms = -EPD_MIN_REFRESH_GAP_MS;  /* 首刷不等待 */
     for (;;) {
         /* 74-M1:渲染生效模式(月历=TTL 回退目标;临时页到期自动回)。 */
         int mode = display_mode_active();
         uint32_t seq = display_mode_seq();
         if (mode != last_mode || seq != last_seq ||
             (mode == DMODE_CALENDAR && day_key() != shown_day)) {
+            /* 切换等待:距上刷不足间隔 → 先睡差值,醒来重查(新请求
+             * 自然以最新 seq 胜出,不排队旧页)。 */
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            int64_t since = now_ms - last_refresh_ms;
+            if (since < EPD_MIN_REFRESH_GAP_MS) {
+                s_result.running = false;
+                vTaskDelay(pdMS_TO_TICKS(EPD_MIN_REFRESH_GAP_MS - since));
+                continue;
+            }
             int64_t t0 = esp_timer_get_time();
             epd_pages_render(mode, display_mode_payload(), bw, red);
             epd_display(bw, red);
+            display_mode_rendered(mode);   /* TTL 自上屏完成起算 */
             s_result.clear_ms = (int)((esp_timer_get_time() - t0) / 1000);
+            last_refresh_ms = t0 / 1000;
             evlog_record(EV_EPD, EPD_PHASE_CLEAR_DONE, (int16_t)s_result.clear_ms);
             ESP_LOGI(TAG, "page %s rendered (%d ms)",
                      display_mode_name(mode), s_result.clear_ms);

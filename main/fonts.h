@@ -25,6 +25,9 @@
  */
 extern const uint8_t u8g2_font_wqy9_t_lunar[] U8G2_FONT_SECTION("u8g2_font_wqy9_t_lunar");
 extern const uint8_t u8g2_font_wqy12_t_lunar[] U8G2_FONT_SECTION("u8g2_font_wqy12_t_lunar");
+/* 74-M1: 全量常用简体(wqy12 gb2312a, 来自 nixy4/u8g2 组件) — 显示页
+ * 文本用;月历继续用 lunar 裁剪版。 */
+extern const uint8_t u8g2_font_wqy12_t_gb2312a[];
 
 // 以下字库来自 u8g2，用于显示数字
 extern const uint8_t u8g2_font_helvB14_tn[] U8G2_FONT_SECTION("u8g2_font_helvB14_tn");

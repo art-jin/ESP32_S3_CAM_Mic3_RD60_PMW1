@@ -24,10 +24,13 @@ static const char *k_names[DMODE_COUNT] = {
 
 static SemaphoreHandle_t s_lock;
 static int       s_mode = DMODE_CALENDAR;
-static int64_t   s_expires_ms = -1;      /* -1 = 默认页/无 TTL */
+static int64_t   s_expires_ms = -1;      /* -1 = 无 TTL;PENDING = 待上屏 */
+static int       s_ttl_req_sec = DISPLAY_TTL_DEFAULT_SEC;
 static char      s_payload[DISPLAY_PAYLOAD_MAX] = "{}";
 static uint32_t  s_seq = 0;
 static TaskHandle_t s_epd_task;
+
+#define TTL_PENDING INT64_MAX
 
 int display_mode_from_name(const char *name)
 {
@@ -62,9 +65,11 @@ bool display_mode_show(int mode, const char *payload_json, int ttl_sec)
     }
     if (mode == DMODE_CALENDAR || mode == DMODE_CALENDAR_OVERLAY) {
         s_expires_ms = -1;
+        s_ttl_req_sec = DISPLAY_TTL_DEFAULT_SEC;
     } else {
-        if (ttl_sec <= 0) ttl_sec = DISPLAY_TTL_DEFAULT_SEC;
-        s_expires_ms = esp_timer_get_time() / 1000 + (int64_t)ttl_sec * 1000;
+        if (ttl_sec < DISPLAY_TTL_MIN_SEC) ttl_sec = DISPLAY_TTL_MIN_SEC;
+        s_ttl_req_sec = ttl_sec;
+        s_expires_ms = TTL_PENDING;   /* 上屏完成(display_mode_rendered)起算 */
     }
     s_seq++;
 
@@ -79,12 +84,24 @@ bool display_mode_show(int mode, const char *payload_json, int ttl_sec)
     return true;
 }
 
+void display_mode_rendered(int mode)
+{
+    lock_init();
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    if (mode == s_mode && s_expires_ms == TTL_PENDING) {
+        s_expires_ms = esp_timer_get_time() / 1000 +
+                       (int64_t)s_ttl_req_sec * 1000;
+    }
+    xSemaphoreGive(s_lock);
+}
+
 int display_mode_active(void)
 {
     lock_init();
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) != pdTRUE) return DMODE_CALENDAR;
     int mode = s_mode;
-    if (s_expires_ms >= 0 && esp_timer_get_time() / 1000 >= s_expires_ms) {
+    if (s_expires_ms != TTL_PENDING && s_expires_ms >= 0 &&
+        esp_timer_get_time() / 1000 >= s_expires_ms) {
         mode = DMODE_CALENDAR;   /* TTL 到期 — 回退页语义(revert 恒 calendar) */
     }
     xSemaphoreGive(s_lock);
@@ -116,8 +133,11 @@ int64_t display_mode_ttl_remaining_ms(void)
     lock_init();
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) != pdTRUE) return -1;
     int64_t r = -1;
-    if (s_expires_ms >= 0)
+    if (s_expires_ms == TTL_PENDING) {
+        r = (int64_t)s_ttl_req_sec * 1000;   /* 未上屏 — 报请求值 */
+    } else if (s_expires_ms >= 0) {
         r = s_expires_ms - esp_timer_get_time() / 1000;
+    }
     xSemaphoreGive(s_lock);
     return r;
 }
