@@ -5,6 +5,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mode_manager.h"
@@ -163,6 +164,27 @@ static esp_err_t handler_ping(httpd_req_t *req)
     return send_json_ok(req, "{\"ok\":true}");
 }
 
+/* P-A (docs/73 §4.3): 本 boot 的复位原因 — 掉线=整机重启后, curl
+ * /api/status 即可读出 BROWNOUT/PANIC/WDT, 无需串口。evlog 的 EV_BOOT
+ * 会被 32 槽环形刷掉, 此字段常驻。 */
+static const char *rst_reason_name(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON:   return "POWERON";
+    case ESP_RST_EXT:       return "EXT";
+    case ESP_RST_SW:        return "SW";
+    case ESP_RST_PANIC:     return "PANIC";
+    case ESP_RST_INT_WDT:   return "INT_WDT";
+    case ESP_RST_TASK_WDT:  return "TASK_WDT";
+    case ESP_RST_WDT:       return "WDT";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT";
+    case ESP_RST_SDIO:      return "SDIO";
+    case ESP_RST_USB:       return "USB";
+    case ESP_RST_JTAG:      return "JTAG";
+    default:                return "OTHER";
+    }
+}
+
 /* OPTIONS catch-all for CORS preflight. */
 static esp_err_t handler_options(httpd_req_t *req)
 {
@@ -222,7 +244,9 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"mqtt\":{\"connected\":%s,\"seq\":%lu,\"dropped\":%lu,\"in_zone\":%s},"
         "\"wifi\":\"%s\","
         "\"ip\":\"%s\","
-        "\"host\":\"%s\""
+        "\"host\":\"%s\","
+        "\"rst\":%d,"
+        "\"rst_reason\":\"%s\""
         "}",
         st.mode == MODE_COMMAND ? "command" : "track",
         subnames[mode_manager_get_submode()],
@@ -255,7 +279,9 @@ static esp_err_t handler_status(httpd_req_t *req)
         zone_in() ? "true" : "false",
         st.wifi_connected ? "connected" : "disconnected",
         st.ip[0] ? st.ip : "",
-        st.hostname[0] ? st.hostname : "");
+        st.hostname[0] ? st.hostname : "",
+        (int)esp_reset_reason(),
+        rst_reason_name(esp_reset_reason()));
 
     return send_json_ok(req, body);
 }

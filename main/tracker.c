@@ -21,10 +21,21 @@ static float            s_last_target_deg = 0.0f;   /* last commanded angle */
 static bool             s_have_target = false;      /* any command issued yet */
 static int64_t          s_last_doa_cmd_us = 0;      /* last DOA-driven command */
 static bool             s_oor_active = false;       /* OOR hysteresis latch */
+static float            s_last_cmd_dir = 0.0f;      /* sign of last issued delta */
+static int64_t          s_last_cmd_us = 0;          /* when it was issued */
 
 /* In fusion mode, sound keeps priority for this long after its last
  * servo command; only then may the radar take over (US-005). */
 #define FUSION_SOUND_HOLD_MS 3000
+
+/* P-A 反向消抖窗：方向反转命令距上一命令小于此值则本帧保持（堵转电流
+ * 尖峰抑制，docs/73 §4.3）。实测摆动周期 0.6-1.5s（greywolf evlog），
+ * 400ms 不够穿透；1.2s 对真人跟踪（走动换向以秒计）无感。 */
+#define TRACKER_REVERSE_HOLD_MS 1200
+
+/* P-A 最小命令间隔：两次命令之间的最小间隔 — 舵机机械上跟不了更快，
+ * 限制命令频率同时降低电流冲击。 */
+#define TRACKER_MIN_CMD_INTERVAL_MS 250
 
 /* Boundary-scan state: when the source is outside mechanical range, the
  * servo oscillates ±scan_amplitude_deg at the nearest boundary. */
@@ -163,11 +174,35 @@ static bool command_target(float target, bool from_doa)
         if (diff < -max_delta) target = s_last_target_deg - max_delta;
     }
 
+    /* P-A (docs/73 §4.3): 反向消抖 + 最小命令间隔 — 快速反向是舵机堵转
+     * 电流尖峰之王。实测 evlog SERVO_CMD ±20° 0.6-1.5s 周期摆动，与活动
+     * 期 brownout 重启强相关（greywolf neck boot=638 实录）。
+     * - 反向且距上令 < REVERSE_HOLD → 本帧保持
+     * - 任意命令间隔 < MIN_CMD_INTERVAL → 本帧保持（舵机跟不上更快） */
+    float req_dir = 0.0f;
+    if (s_have_target) {
+        int64_t since_cmd_us = esp_timer_get_time() - s_last_cmd_us;
+        if (since_cmd_us <
+                (int64_t)TRACKER_MIN_CMD_INTERVAL_MS * 1000LL) {
+            s_mode = TRACKER_MODE_TRACKING;
+            return false;
+        }
+        float rd = target - s_last_target_deg;
+        req_dir = (rd > 0) - (rd < 0);
+        if (req_dir != 0 && s_last_cmd_dir != 0 && req_dir != s_last_cmd_dir &&
+            since_cmd_us < (int64_t)TRACKER_REVERSE_HOLD_MS * 1000LL) {
+            s_mode = TRACKER_MODE_TRACKING;   /* 保持当前角度，不算 idle */
+            return false;
+        }
+    }
+
     /* Command the servo. */
     evlog_record(EV_SERVO_CMD, SRC_TRACKER, (int16_t)target);
     servo_set_angle_deg(target);
+    s_last_cmd_dir = req_dir;
     s_last_target_deg = target;
-    s_last_update_us = esp_timer_get_time();   /* mark command time for idle-return dt */
+    s_last_cmd_us = esp_timer_get_time();
+    s_last_update_us = s_last_cmd_us;         /* mark command time for idle-return dt */
     if (from_doa) s_last_doa_cmd_us = s_last_update_us;
     s_have_target = true;
     s_mode = TRACKER_MODE_TRACKING;
