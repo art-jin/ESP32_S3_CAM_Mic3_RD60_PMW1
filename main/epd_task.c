@@ -125,7 +125,8 @@ static void epd_task(void *arg)
         int mode = display_mode_active();
         uint32_t seq = display_mode_seq();
         if (mode != last_mode || seq != last_seq ||
-            (mode == DMODE_CALENDAR && day_key() != shown_day)) {
+            ((mode == DMODE_CALENDAR || mode == DMODE_CALENDAR_OVERLAY) &&
+             day_key() != shown_day)) {   /* M2:overlay 常驻页跨天也要挪"今天"高亮 */
             /* 切换等待:距上刷不足间隔 → 先睡差值,醒来重查(新请求
              * 自然以最新 seq 胜出,不排队旧页)。 */
             int64_t now_ms = esp_timer_get_time() / 1000;

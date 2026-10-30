@@ -1,7 +1,10 @@
 /* display_mode.c — docs/74 M1 显示模式注册表实现。
  * 状态只有一份(互斥锁保护),REST /api/display 与 MQTT cmd/display 都汇
  * 到 display_mode_show();EPD task 用 (mode,seq) 检测变更,TTL 到期由
- * display_mode_active() 的询问方自行发现(EPD park 超时取 min(ttl,1h))。 */
+ * display_mode_active() 的询问方自行发现(EPD park 超时取 min(ttl,1h))。
+ * docs/74 M2：最近一次 calendar_overlay 载荷暂存于 s_overlay_json，临时
+ * 页 TTL 到期回退时套用 → 月历常驻主页始终带节假日/待办框线(重启丢失，
+ * 等 guardian 次推恢复；NVS 持久化留 M1.5)。 */
 #include "display_mode.h"
 
 #include <string.h>
@@ -27,6 +30,7 @@ static int       s_mode = DMODE_CALENDAR;
 static int64_t   s_expires_ms = -1;      /* -1 = 无 TTL;PENDING = 待上屏 */
 static int       s_ttl_req_sec = DISPLAY_TTL_DEFAULT_SEC;
 static char      s_payload[DISPLAY_PAYLOAD_MAX] = "{}";
+static char      s_overlay_json[DISPLAY_PAYLOAD_MAX];  /* 空串=无暂存(.bss 零初始化) */
 static uint32_t  s_seq = 0;
 static TaskHandle_t s_epd_task;
 
@@ -62,6 +66,12 @@ bool display_mode_show(int mode, const char *payload_json, int ttl_sec)
         s_payload[DISPLAY_PAYLOAD_MAX - 1] = '\0';
     } else {
         strcpy(s_payload, "{}");
+    }
+    if (mode == DMODE_CALENDAR_OVERLAY && s_payload[0] != '\0' &&
+        s_payload[1] != '\0') {
+        /* M2 暂存：非空载荷("{}" 亦视为无内容,不覆盖旧暂存) */
+        strncpy(s_overlay_json, s_payload, DISPLAY_PAYLOAD_MAX - 1);
+        s_overlay_json[DISPLAY_PAYLOAD_MAX - 1] = '\0';
     }
     if (mode == DMODE_CALENDAR || mode == DMODE_CALENDAR_OVERLAY) {
         s_expires_ms = -1;
@@ -102,7 +112,9 @@ int display_mode_active(void)
     int mode = s_mode;
     if (s_expires_ms != TTL_PENDING && s_expires_ms >= 0 &&
         esp_timer_get_time() / 1000 >= s_expires_ms) {
-        mode = DMODE_CALENDAR;   /* TTL 到期 — 回退页语义(revert 恒 calendar) */
+        /* TTL 到期 — 回退页语义：有 overlay 暂存 → 带框线月历(M2 常驻主页)，
+         * 否则纯月历。 */
+        mode = s_overlay_json[0] ? DMODE_CALENDAR_OVERLAY : DMODE_CALENDAR;
     }
     xSemaphoreGive(s_lock);
     return mode;
@@ -112,9 +124,14 @@ const char *display_mode_payload(void)
 {
     lock_init();
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) != pdTRUE) return "{}";
-    /* 载荷属于最近一次 show;TTL 回退后 active()=CALENDAR,其渲染器
-     * (及 overlay 的本地月历部分)不读临时页字段,过期载荷无害。 */
+    /* 载荷属于最近一次 show；TTL 回退后的 active()=CALENDAR_OVERLAY 时，
+     * s_payload 已是过期临时页字段，须改供 overlay 暂存。 */
     const char *p = s_payload;
+    if (s_mode != DMODE_CALENDAR_OVERLAY &&
+        s_expires_ms != TTL_PENDING && s_expires_ms >= 0 &&
+        esp_timer_get_time() / 1000 >= s_expires_ms && s_overlay_json[0]) {
+        p = s_overlay_json;
+    }
     xSemaphoreGive(s_lock);
     return p;
 }
