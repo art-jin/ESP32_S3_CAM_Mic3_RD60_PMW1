@@ -851,9 +851,9 @@ static void render_todo_table(uint8_t *bw, uint8_t *red, const char *payload)
 
     for (int i = 0; i < n; i++) {
         int ry = top + hdr_h + i * row_h + row_h / 2 + 8;   /* 16px 字基线 */
+        /* 用户裁决 10-30: 今天的代办整行红(日期+时间+事项),未来行黑 */
         u8g2_SetForegroundColor(&font, rows[i].today ? U_RED : U_BLACK);
         draw_text(&font, 8, ry, rows[i].date, 1);
-        u8g2_SetForegroundColor(&font, U_BLACK);
         draw_text(&font, c1 + 6, ry, rows[i].time, 1);
         utf8_trunc_to_width(&font, rows[i].text, x_end - (c2 + 8) - 6);
         draw_text(&font, c2 + 8, ry, rows[i].text, 1);
