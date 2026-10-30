@@ -825,11 +825,14 @@ static void render_todo_table(uint8_t *bw, uint8_t *red, const char *payload)
 
     draw_title_bar(&font, title);
 
-    const int top = TITLE_H + 4, hdr_h = 26, row_h = 30;
+    const int top = TITLE_H + 4, hdr_h = 26;
     const int c1 = 64, c2 = 122, x_end = EPD_WIDTH - 1;
-    int max_rows = (EPD_HEIGHT - 3 - (top + hdr_h)) / row_h;
+    int avail = EPD_HEIGHT - 3 - (top + hdr_h);
+    int max_rows = avail / 26;               /* 最密 26px/行 */
     if (max_rows > 12) max_rows = 12;
     if (n > max_rows) n = max_rows;
+    int row_h = avail / n;                   /* 行距伸展铺满(26..44) */
+    if (row_h > 44) row_h = 44;
     const int bot = top + hdr_h + n * row_h - 1;
 
     /* 表头黑底反白 + 列线 + 行线 */
@@ -847,7 +850,7 @@ static void render_todo_table(uint8_t *bw, uint8_t *red, const char *payload)
     draw_text(&font, c2 + 8, top + 19, "事项", 1);
 
     for (int i = 0; i < n; i++) {
-        int ry = top + hdr_h + i * row_h + 22;
+        int ry = top + hdr_h + i * row_h + row_h / 2 + 8;   /* 16px 字基线 */
         u8g2_SetForegroundColor(&font, rows[i].today ? U_RED : U_BLACK);
         draw_text(&font, 8, ry, rows[i].date, 1);
         u8g2_SetForegroundColor(&font, U_BLACK);
@@ -877,8 +880,8 @@ void epd_pages_render(int mode, const char *payload_json,
         render_lines_from_json(bw, red, payload, "msg", NULL, 0);
         break;
     case DMODE_TODO:
-        if (EPD_HEIGHT >= 400)
-            render_todo_table(bw, red, payload);   /* 4.2吋表格版(10-30 裁决) */
+        if (EPD_WIDTH >= 400)   /* 4.2吋(400×300)横置:按宽判,HEIGHT=300 会误走旧分支(10-30 实录) */
+            render_todo_table(bw, red, payload);
         else
             render_lines_from_json(bw, red, payload, "todo", "items", -1);
         break;
