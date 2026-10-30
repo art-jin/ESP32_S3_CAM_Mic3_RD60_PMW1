@@ -209,7 +209,9 @@ static void draw_month_days(u8g2_font_t *font, int x0, int y,
         snprintf(num_buf, sizeof(num_buf), "%u", (unsigned)(uint8_t)day);
 
         if (is_today) {
-            fill_rect(g_bw, g_red, cx - sq/2, cy - sq/2 - 2, cx + sq/2, cy + sq/2 + 2, CLR_RED);
+            /* 用户裁决 10-30:当前日期=黑底白字(原红底);今日有代办时
+             * overlay 层在其外围再画红框 */
+            fill_rect(g_bw, g_red, cx - sq/2, cy - sq/2 - 2, cx + sq/2, cy + sq/2 + 2, CLR_BLACK);
             u8g2_SetFont(font, u8g2_font_helvB18_tn);
             u8g2_SetFontMode(font, 1);
             u8g2_SetForegroundColor(font, U_WHITE);

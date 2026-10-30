@@ -8,6 +8,7 @@
 #include "display_mode.h"
 
 #include <string.h>
+#include <time.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -30,11 +31,50 @@ static int       s_mode = DMODE_CALENDAR;
 static int64_t   s_expires_ms = -1;      /* -1 = 无 TTL;PENDING = 待上屏 */
 static int       s_ttl_req_sec = DISPLAY_TTL_DEFAULT_SEC;
 static char      s_payload[DISPLAY_PAYLOAD_MAX] = "{}";
-static char      s_overlay_json[DISPLAY_PAYLOAD_MAX];  /* 空串=无暂存(.bss 零初始化) */
+static char      s_overlay_json[DISPLAY_PAYLOAD_MAX];  /* 归一化 {"overlay":…} */
+static int       s_overlay_day = -1;   /* 暂存日戳 yyyymmdd;-1=无;隔天失效(用户裁决 10-30) */
 static uint32_t  s_seq = 0;
 static TaskHandle_t s_epd_task;
 
 #define TTL_PENDING INT64_MAX
+
+static int today_key(void)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    return (tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday;
+}
+
+/* 从任意载荷提取 "overlay" 对象归一化暂存(用户裁决 10-30):
+ * - calendar_overlay 页:载荷本体即含 overlay;
+ * - 待办页等临时页:guardian 以旁带字段随页下发最新 overlay,收到即无感
+ *   更新暂存,不切页——回退月历立即反映新代办框线。
+ * 暂存带日戳,隔天失效(guardian 每晨 07:10 与每次待办意图都会重推)。 */
+static void stash_overlay_from(const char *payload_json)
+{
+    if (!payload_json || !strstr(payload_json, "\"overlay\""))
+        return;
+    cJSON *root = cJSON_Parse(payload_json);
+    if (!root) return;
+    cJSON *ov = cJSON_GetObjectItem(root, "overlay");
+    if (cJSON_IsObject(ov)) {
+        char *s = cJSON_PrintUnformatted(ov);
+        if (s) {
+            int rc = snprintf(s_overlay_json, DISPLAY_PAYLOAD_MAX,
+                              "{\"overlay\":%s}", s);
+            if (rc < 0) s_overlay_json[0] = '\0';
+            s_overlay_day = today_key();
+            cJSON_free(s);
+        }
+    }
+    cJSON_Delete(root);
+}
+
+static bool overlay_stash_valid(void)
+{
+    return s_overlay_json[0] != '\0' && s_overlay_day == today_key();
+}
 
 int display_mode_from_name(const char *name)
 {
@@ -67,12 +107,7 @@ bool display_mode_show(int mode, const char *payload_json, int ttl_sec)
     } else {
         strcpy(s_payload, "{}");
     }
-    if (mode == DMODE_CALENDAR_OVERLAY && s_payload[0] != '\0' &&
-        s_payload[1] != '\0') {
-        /* M2 暂存：非空载荷("{}" 亦视为无内容,不覆盖旧暂存) */
-        strncpy(s_overlay_json, s_payload, DISPLAY_PAYLOAD_MAX - 1);
-        s_overlay_json[DISPLAY_PAYLOAD_MAX - 1] = '\0';
-    }
+    stash_overlay_from(s_payload);
     if (mode == DMODE_CALENDAR || mode == DMODE_CALENDAR_OVERLAY) {
         s_expires_ms = -1;
         s_ttl_req_sec = DISPLAY_TTL_DEFAULT_SEC;
@@ -112,9 +147,9 @@ int display_mode_active(void)
     int mode = s_mode;
     if (s_expires_ms != TTL_PENDING && s_expires_ms >= 0 &&
         esp_timer_get_time() / 1000 >= s_expires_ms) {
-        /* TTL 到期 — 回退页语义：有 overlay 暂存 → 带框线月历(M2 常驻主页)，
-         * 否则纯月历。 */
-        mode = s_overlay_json[0] ? DMODE_CALENDAR_OVERLAY : DMODE_CALENDAR;
+        /* TTL 到期 — 回退页语义：当日 overlay 暂存有效 → 带框线月历
+         * (M2 常驻主页),否则纯月历。 */
+        mode = overlay_stash_valid() ? DMODE_CALENDAR_OVERLAY : DMODE_CALENDAR;
     }
     xSemaphoreGive(s_lock);
     return mode;
@@ -125,11 +160,11 @@ const char *display_mode_payload(void)
     lock_init();
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) != pdTRUE) return "{}";
     /* 载荷属于最近一次 show；TTL 回退后的 active()=CALENDAR_OVERLAY 时，
-     * s_payload 已是过期临时页字段，须改供 overlay 暂存。 */
+     * s_payload 已是过期临时页字段，须改供当日 overlay 暂存。 */
     const char *p = s_payload;
     if (s_mode != DMODE_CALENDAR_OVERLAY &&
         s_expires_ms != TTL_PENDING && s_expires_ms >= 0 &&
-        esp_timer_get_time() / 1000 >= s_expires_ms && s_overlay_json[0]) {
+        esp_timer_get_time() / 1000 >= s_expires_ms && overlay_stash_valid()) {
         p = s_overlay_json;
     }
     xSemaphoreGive(s_lock);

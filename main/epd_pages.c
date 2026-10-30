@@ -699,52 +699,62 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
                        cx + sq / 2 + 3, cy + sq / 2 + 5, CLR_RED, 2);
         }
     }
-    cJSON *hol = cJSON_GetObjectItem(ov, "holidays");
-    if (cJSON_IsArray(hol)) {
-        cJSON *it;
-        cJSON_ArrayForEach(it, hol) {
-            cJSON *d = cJSON_GetObjectItem(it, "d");
-            if (!cJSON_IsNumber(d)) continue;
-            int day = d->valueint;
-            if (day < 1 || day > dim) continue;
-            int col = (fw + day - 1) % 7, row = (fw + day - 1) / 7;
-            int cx = margin + col * colw + colw / 2;
-            int cy = wh_y + wh_h + row * rowh + rowh / 2;
-            /* 节假日 = 细黑框(对齐 KinCal 灰度框语义;三色屏以黑代灰,
-             * 与待办红框靠颜色区分) — 用户裁决 10-29 */
-            frame_rect(cx - sq / 2 - 1, cy - sq / 2 - 3,
-                       cx + sq / 2 + 1, cy + sq / 2 + 3, CLR_BLACK, 2);
-        }
-    }
-    /* 补班日(type=workday,如 10-10 周六)= 工作日字体(黑)——白底擦除周末
-     * 红字后 helvB18_tn 黑字重画,几何与 epd_calendar draw_month_days 同款。
-     * 今天高亮(红底白字)优先,不重画。用户裁决 10-30。 */
-    cJSON *wd = cJSON_GetObjectItem(ov, "workdays");
-    if (cJSON_IsArray(wd)) {
+    /* ---- 日期数字重上色(用户裁决 10-30,替代旧节假日黑框) ----
+     * 法定节假日=红字;补班工作日=黑字;今天=黑底白字(基座已画,跳过)。
+     * 基座默认:周末列红字、工作日列黑字 → 只重画会变色的组合:
+     *   节假日落在工作日列(黑→红)、补班落在周末列(红→黑)。 */
+    {
         u8g2_font_t font;
         memset(&font, 0, sizeof(font));
         font.draw_hv_line = u8g2_draw_hv_line;
         u8g2_SetFont(&font, u8g2_font_helvB18_tn);
         u8g2_SetBackgroundColor(&font, U_WHITE);
         u8g2_SetFontMode(&font, 0);
-        u8g2_SetForegroundColor(&font, U_BLACK);
-        cJSON *it;
-        cJSON_ArrayForEach(it, wd) {
-            if (!cJSON_IsNumber(it)) continue;
-            int day = it->valueint;
-            if (day < 1 || day > dim) continue;
-            int col = (fw + day - 1) % 7;
-            if (col != 0 && col != 6) continue;   /* 本就是工作日样式 */
-            if (day == tm_now.tm_mday) continue;  /* 今天高亮优先 */
-            int row = (fw + day - 1) / 7;
-            int cx = margin + col * colw + colw / 2;
-            int cy = wh_y + wh_h + row * rowh + rowh / 2;
-            fill_rect(cx - sq / 2, cy - sq / 2,
-                      cx + sq / 2, cy + sq / 2, CLR_WHITE);
-            char nb[8];
-            snprintf(nb, sizeof(nb), "%u", (unsigned)(uint8_t)day);
-            int nw = text_w(&font, nb, 1);
-            draw_text(&font, cx - nw / 2, cy + 6, nb, 1);
+
+        cJSON *hol = cJSON_GetObjectItem(ov, "holidays");
+        if (cJSON_IsArray(hol)) {
+            cJSON *it;
+            cJSON_ArrayForEach(it, hol) {
+                cJSON *d = cJSON_GetObjectItem(it, "d");
+                if (!cJSON_IsNumber(d)) continue;
+                int day = d->valueint;
+                if (day < 1 || day > dim) continue;
+                int col = (fw + day - 1) % 7;
+                if (col == 0 || col == 6) continue;  /* 周末列本就红字 */
+                if (day == tm_now.tm_mday) continue; /* 今天黑底白字优先 */
+                int row = (fw + day - 1) / 7;
+                int cx = margin + col * colw + colw / 2;
+                int cy = wh_y + wh_h + row * rowh + rowh / 2;
+                fill_rect(cx - sq / 2, cy - sq / 2,
+                          cx + sq / 2, cy + sq / 2, CLR_WHITE);
+                char nb[8];
+                snprintf(nb, sizeof(nb), "%u", (unsigned)(uint8_t)day);
+                u8g2_SetForegroundColor(&font, U_RED);
+                int nw = text_w(&font, nb, 1);
+                draw_text(&font, cx - nw / 2, cy + 6, nb, 1);
+            }
+        }
+        cJSON *wd = cJSON_GetObjectItem(ov, "workdays");
+        if (cJSON_IsArray(wd)) {
+            cJSON *it;
+            cJSON_ArrayForEach(it, wd) {
+                if (!cJSON_IsNumber(it)) continue;
+                int day = it->valueint;
+                if (day < 1 || day > dim) continue;
+                int col = (fw + day - 1) % 7;
+                if (col != 0 && col != 6) continue;  /* 工作日列本就黑字 */
+                if (day == tm_now.tm_mday) continue;
+                int row = (fw + day - 1) / 7;
+                int cx = margin + col * colw + colw / 2;
+                int cy = wh_y + wh_h + row * rowh + rowh / 2;
+                fill_rect(cx - sq / 2, cy - sq / 2,
+                          cx + sq / 2, cy + sq / 2, CLR_WHITE);
+                char nb[8];
+                snprintf(nb, sizeof(nb), "%u", (unsigned)(uint8_t)day);
+                u8g2_SetForegroundColor(&font, U_BLACK);
+                int nw = text_w(&font, nb, 1);
+                draw_text(&font, cx - nw / 2, cy + 6, nb, 1);
+            }
         }
     }
     cJSON_Delete(root);
