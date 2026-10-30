@@ -750,6 +750,113 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
     cJSON_Delete(root);
 }
 
+/* ---- todo 表格页(用户裁决 10-30:日期|时间|事项 三列,今天红/未来黑) ---- */
+
+static void utf8_trunc_to_width(u8g2_font_t *font, char *s, int max_w)
+{
+    while (*s && text_w(font, s, 1) > max_w) {
+        int len = (int)strlen(s);
+        while (len > 0 && (s[len - 1] & 0xC0) == 0x80) len--;
+        if (len > 0) len--;
+        if (len <= 0) { s[0] = '\0'; break; }
+        s[len] = '\0';
+    }
+}
+
+static void render_todo_table(uint8_t *bw, uint8_t *red, const char *payload)
+{
+    memset(bw, 0xFF, EPD_BUF_SIZE);
+    memset(red, 0x00, EPD_BUF_SIZE);
+    g_bw = bw; g_red = red;
+
+    static struct { char date[16]; char time[12]; char text[80]; int today; }
+        rows[12];
+    int n = 0;
+    char title[48] = "待办";
+
+    cJSON *root = cJSON_Parse(payload);
+    if (root) {
+        cJSON *obj = cJSON_GetObjectItem(root, "todo");
+        cJSON *t = obj ? cJSON_GetObjectItem(obj, "title") : NULL;
+        if (cJSON_IsString(t)) snprintf(title, sizeof(title), "%s", t->valuestring);
+        cJSON *arr = cJSON_GetObjectItem(obj ? obj : root, "items");
+        cJSON *it;
+        cJSON_ArrayForEach(it, arr) {
+            if (n >= 12) break;
+            rows[n].date[0] = rows[n].time[0] = rows[n].text[0] = '\0';
+            rows[n].today = 0;
+            cJSON *d = cJSON_GetObjectItem(it, "date");
+            if (cJSON_IsString(d)) {                  /* v2 行 {date,time,text,today} */
+                snprintf(rows[n].date, sizeof(rows[n].date), "%s", d->valuestring);
+                cJSON *tm = cJSON_GetObjectItem(it, "time");
+                cJSON *tx = cJSON_GetObjectItem(it, "text");
+                cJSON *td = cJSON_GetObjectItem(it, "today");
+                if (cJSON_IsString(tm))
+                    snprintf(rows[n].time, sizeof(rows[n].time), "%s", tm->valuestring);
+                if (cJSON_IsString(tx))
+                    snprintf(rows[n].text, sizeof(rows[n].text), "%s", tx->valuestring);
+                rows[n].today = cJSON_IsTrue(td);
+                n++;
+            } else if (cJSON_IsObject(it)) {          /* 旧行 {time,text,done} */
+                cJSON *tm = cJSON_GetObjectItem(it, "time");
+                cJSON *tx = cJSON_GetObjectItem(it, "text");
+                cJSON *dn = cJSON_GetObjectItem(it, "done");
+                if (cJSON_IsString(tm))
+                    snprintf(rows[n].time, sizeof(rows[n].time), "%s", tm->valuestring);
+                if (cJSON_IsString(tx))
+                    snprintf(rows[n].text, sizeof(rows[n].text), "%s%s",
+                             tx->valuestring, cJSON_IsTrue(dn) ? " [已毕]" : "");
+                n++;
+            } else if (cJSON_IsString(it)) {          /* 裸字符串 */
+                snprintf(rows[n].text, sizeof(rows[n].text), "%s", it->valuestring);
+                n++;
+            }
+        }
+        cJSON_Delete(root);
+    }
+    if (n == 0) { snprintf(rows[0].text, sizeof(rows[0].text), "今天没有安排"); n = 1; }
+
+    u8g2_font_t font;
+    memset(&font, 0, sizeof(font));
+    font.draw_hv_line = u8g2_draw_hv_line;
+    u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
+    u8g2_SetFontMode(&font, 1);
+    u8g2_SetBackgroundColor(&font, U_WHITE);
+
+    draw_title_bar(&font, title);
+
+    const int top = TITLE_H + 4, hdr_h = 26, row_h = 30;
+    const int c1 = 64, c2 = 122, x_end = EPD_WIDTH - 1;
+    int max_rows = (EPD_HEIGHT - 3 - (top + hdr_h)) / row_h;
+    if (max_rows > 12) max_rows = 12;
+    if (n > max_rows) n = max_rows;
+    const int bot = top + hdr_h + n * row_h - 1;
+
+    /* 表头黑底反白 + 列线 + 行线 */
+    fill_rect(1, top, x_end, top + hdr_h - 1, CLR_BLACK);
+    fill_rect(c1, top, c1 + 1, bot, CLR_BLACK);
+    fill_rect(c2, top, c2 + 1, bot, CLR_BLACK);
+    frame_rect(1, top, x_end, bot, CLR_BLACK, 2);
+    for (int i = 1; i < n; i++)
+        fill_rect(2, top + hdr_h + i * row_h - 1, x_end - 1,
+                  top + hdr_h + i * row_h - 1, CLR_BLACK);
+
+    u8g2_SetForegroundColor(&font, U_WHITE);
+    draw_text(&font, 10, top + 19, "日期", 1);
+    draw_text(&font, c1 + 8, top + 19, "时间", 1);
+    draw_text(&font, c2 + 8, top + 19, "事项", 1);
+
+    for (int i = 0; i < n; i++) {
+        int ry = top + hdr_h + i * row_h + 22;
+        u8g2_SetForegroundColor(&font, rows[i].today ? U_RED : U_BLACK);
+        draw_text(&font, 8, ry, rows[i].date, 1);
+        u8g2_SetForegroundColor(&font, U_BLACK);
+        draw_text(&font, c1 + 6, ry, rows[i].time, 1);
+        utf8_trunc_to_width(&font, rows[i].text, x_end - (c2 + 8) - 6);
+        draw_text(&font, c2 + 8, ry, rows[i].text, 1);
+    }
+}
+
 /* ---- 分发 ---- */
 
 void epd_pages_render(int mode, const char *payload_json,
@@ -770,7 +877,10 @@ void epd_pages_render(int mode, const char *payload_json,
         render_lines_from_json(bw, red, payload, "msg", NULL, 0);
         break;
     case DMODE_TODO:
-        render_lines_from_json(bw, red, payload, "todo", "items", -1);
+        if (EPD_HEIGHT >= 400)
+            render_todo_table(bw, red, payload);   /* 4.2吋表格版(10-30 裁决) */
+        else
+            render_lines_from_json(bw, red, payload, "todo", "items", -1);
         break;
     case DMODE_STATUS:
         render_status(bw, red);
