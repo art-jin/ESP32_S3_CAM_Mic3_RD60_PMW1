@@ -716,6 +716,37 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
                        cx + sq / 2 + 1, cy + sq / 2 + 3, CLR_BLACK, 2);
         }
     }
+    /* 补班日(type=workday,如 10-10 周六)= 工作日字体(黑)——白底擦除周末
+     * 红字后 helvB18_tn 黑字重画,几何与 epd_calendar draw_month_days 同款。
+     * 今天高亮(红底白字)优先,不重画。用户裁决 10-30。 */
+    cJSON *wd = cJSON_GetObjectItem(ov, "workdays");
+    if (cJSON_IsArray(wd)) {
+        u8g2_font_t font;
+        memset(&font, 0, sizeof(font));
+        font.draw_hv_line = u8g2_draw_hv_line;
+        u8g2_SetFont(&font, u8g2_font_helvB18_tn);
+        u8g2_SetBackgroundColor(&font, U_WHITE);
+        u8g2_SetFontMode(&font, 0);
+        u8g2_SetForegroundColor(&font, U_BLACK);
+        cJSON *it;
+        cJSON_ArrayForEach(it, wd) {
+            if (!cJSON_IsNumber(it)) continue;
+            int day = it->valueint;
+            if (day < 1 || day > dim) continue;
+            int col = (fw + day - 1) % 7;
+            if (col != 0 && col != 6) continue;   /* 本就是工作日样式 */
+            if (day == tm_now.tm_mday) continue;  /* 今天高亮优先 */
+            int row = (fw + day - 1) / 7;
+            int cx = margin + col * colw + colw / 2;
+            int cy = wh_y + wh_h + row * rowh + rowh / 2;
+            fill_rect(cx - sq / 2, cy - sq / 2,
+                      cx + sq / 2, cy + sq / 2, CLR_WHITE);
+            char nb[8];
+            snprintf(nb, sizeof(nb), "%u", (unsigned)(uint8_t)day);
+            int nw = text_w(&font, nb, 1);
+            draw_text(&font, cx - nw / 2, cy + 6, nb, 1);
+        }
+    }
     cJSON_Delete(root);
 }
 
