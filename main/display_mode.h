@@ -16,6 +16,7 @@ enum {
     DMODE_STATUS,              /* 本地状态自渲染(不依赖载荷) */
     DMODE_MEDGRID,             /* 3×7 药盒格 */
     DMODE_MSG,                 /* title+lines 确认页 */
+    DMODE_MONTH_VIEW,          /* 任意月浏览页(M3.2):month.{year,month}+框线,临时 TTL */
     DMODE_COUNT
 };
 

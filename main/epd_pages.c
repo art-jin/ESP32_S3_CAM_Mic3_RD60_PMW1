@@ -654,29 +654,23 @@ static int day_of_week(int y, int m, int d)
     return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
 }
 
-static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
-                                    const char *payload)
+/* ---- 月历装饰层:todo 红框 + 节假日/补班重上色(M3.2 从 render_calendar_overlay
+ * 抽出,calendar_overlay 本月页与 month_view 浏览页共用)。month_obj 为含
+ * todo_days/holidays/workdays 的 cJSON 对象;today_mday<0 = 浏览月(基座没画
+ * "今天"黑底,重上色无需跳过任何日)。 ---- */
+
+static void apply_month_decor(uint8_t *bw, uint8_t *red,
+                              int year, int month, int today_mday,
+                              const cJSON *month_obj)
 {
-    epd_calendar_render(bw, red);
     g_bw = bw; g_red = red;
-
-    cJSON *root = cJSON_Parse(payload);
-    cJSON *ov = root ? cJSON_GetObjectItem(root, "overlay") : NULL;
-    if (!cJSON_IsObject(ov)) { if (root) cJSON_Delete(root); return; }
-
-    time_t now;
-    struct tm tm_now;
-    time(&now);
-    localtime_r(&now, &tm_now);
-    int year = tm_now.tm_year + 1900, month = tm_now.tm_mon + 1;
 
     bool large = (EPD_HEIGHT >= 400);
     int margin = 6;
     int wh_y = large ? 44 : 32;
     int wh_h = large ? 30 : 22;
-    int dim = 31;
     static const int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
-    dim = mdays[month - 1];
+    int dim = mdays[month - 1];
     if (month == 2 && (year % 400 == 0 || (year % 4 == 0 && year % 100)))
         dim = 29;
     int fw = day_of_week(year, month, 1);
@@ -685,9 +679,9 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
     int rowh = (EPD_HEIGHT - wh_y - wh_h - 4) / nrows;
     int sq = large ? 34 : 30;
 
-    cJSON *td = cJSON_GetObjectItem(ov, "todo_days");
+    const cJSON *td = cJSON_GetObjectItem(month_obj, "todo_days");
     if (cJSON_IsArray(td)) {
-        cJSON *it;
+        const cJSON *it;
         cJSON_ArrayForEach(it, td) {
             if (!cJSON_IsNumber(it)) continue;
             int day = it->valueint;
@@ -711,9 +705,9 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
         u8g2_SetBackgroundColor(&font, U_WHITE);
         u8g2_SetFontMode(&font, 0);
 
-        cJSON *hol = cJSON_GetObjectItem(ov, "holidays");
+        const cJSON *hol = cJSON_GetObjectItem(month_obj, "holidays");
         if (cJSON_IsArray(hol)) {
-            cJSON *it;
+            const cJSON *it;
             cJSON_ArrayForEach(it, hol) {
                 cJSON *d = cJSON_GetObjectItem(it, "d");
                 if (!cJSON_IsNumber(d)) continue;
@@ -721,7 +715,8 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
                 if (day < 1 || day > dim) continue;
                 int col = (fw + day - 1) % 7;
                 if (col == 0 || col == 6) continue;  /* 周末列本就红字 */
-                if (day == tm_now.tm_mday) continue; /* 今天黑底白字优先 */
+                if (today_mday > 0 && day == today_mday)
+                    continue;   /* 今天黑底白字优先 */
                 int row = (fw + day - 1) / 7;
                 int cx = margin + col * colw + colw / 2;
                 int cy = wh_y + wh_h + row * rowh + rowh / 2;
@@ -734,16 +729,16 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
                 draw_text(&font, cx - nw / 2, cy + 6, nb, 1);
             }
         }
-        cJSON *wd = cJSON_GetObjectItem(ov, "workdays");
+        const cJSON *wd = cJSON_GetObjectItem(month_obj, "workdays");
         if (cJSON_IsArray(wd)) {
-            cJSON *it;
+            const cJSON *it;
             cJSON_ArrayForEach(it, wd) {
                 if (!cJSON_IsNumber(it)) continue;
                 int day = it->valueint;
                 if (day < 1 || day > dim) continue;
                 int col = (fw + day - 1) % 7;
                 if (col != 0 && col != 6) continue;  /* 工作日列本就黑字 */
-                if (day == tm_now.tm_mday) continue;
+                if (today_mday > 0 && day == today_mday) continue;
                 int row = (fw + day - 1) / 7;
                 int cx = margin + col * colw + colw / 2;
                 int cy = wh_y + wh_h + row * rowh + rowh / 2;
@@ -757,7 +752,47 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
             }
         }
     }
+}
+
+static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
+                                    const char *payload)
+{
+    time_t now;
+    struct tm tm_now;
+    time(&now);
+    localtime_r(&now, &tm_now);
+    int year = tm_now.tm_year + 1900, month = tm_now.tm_mon + 1;
+
+    epd_calendar_render_month(bw, red, year, month, tm_now.tm_mday);
+
+    cJSON *root = cJSON_Parse(payload);
+    cJSON *ov = root ? cJSON_GetObjectItem(root, "overlay") : NULL;
+    if (!cJSON_IsObject(ov)) { if (root) cJSON_Delete(root); return; }
+    apply_month_decor(bw, red, year, month, tm_now.tm_mday, ov);
     cJSON_Delete(root);
+}
+
+/* ---- month_view:任意月浏览页(docs/74 M3.2,语音"看下个月") ----
+ * 载荷 {"mode":"month_view","month":{"year":2026,"month":11,
+ *   "todo_days":[21,23],"holidays":[{"d":1,"name":"元旦"}],"workdays":[…]}}
+ * 键名刻意不用顶层 "overlay" — display_mode stash_overlay_from() 会把
+ * 顶层 overlay 收编进当日暂存,下月节假日就会画到本月常驻主页上。 */
+static void render_month_view(uint8_t *bw, uint8_t *red, const char *payload)
+{
+    cJSON *root = cJSON_Parse(payload);
+    cJSON *mv = root ? cJSON_GetObjectItem(root, "month") : NULL;
+    cJSON *y = cJSON_IsObject(mv) ? cJSON_GetObjectItem(mv, "year") : NULL;
+    cJSON *m = cJSON_IsObject(mv) ? cJSON_GetObjectItem(mv, "month") : NULL;
+    if (!cJSON_IsNumber(y) || !cJSON_IsNumber(m) ||
+        y->valueint < 2000 || y->valueint > 2099 ||
+        m->valueint < 1 || m->valueint > 12) {
+        epd_calendar_render(bw, red);   /* 载荷残缺 → 本月兜底 */
+        if (root) cJSON_Delete(root);
+        return;
+    }
+    epd_calendar_render_month(bw, red, y->valueint, m->valueint, -1);
+    apply_month_decor(bw, red, y->valueint, m->valueint, -1, mv);
+    if (root) cJSON_Delete(root);
 }
 
 /* ---- todo 表格页(用户裁决 10-30:日期|时间|事项 三列,今天红/未来黑) ---- */
@@ -900,6 +935,9 @@ void epd_pages_render(int mode, const char *payload_json,
         break;
     case DMODE_MEDGRID:
         render_medgrid(bw, red, payload);
+        break;
+    case DMODE_MONTH_VIEW:
+        render_month_view(bw, red, payload);
         break;
     default:
         epd_calendar_render(bw, red);

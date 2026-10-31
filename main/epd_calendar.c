@@ -229,14 +229,7 @@ static void draw_month_days(u8g2_font_t *font, int x0, int y,
 
 /* ---- Public API ---- */
 
-bool epd_calendar_time_ready(void)
-{
-    time_t now;
-    time(&now);
-    return now > 1700000000;   /* after 2023-11: NTP-synced */
-}
-
-void epd_calendar_render(uint8_t *bw, uint8_t *red)
+static void ensure_tz(void)
 {
     static bool tz_done;
     if (!tz_done) {
@@ -244,7 +237,58 @@ void epd_calendar_render(uint8_t *bw, uint8_t *red)
         tzset();
         tz_done = true;
     }
+}
 
+bool epd_calendar_time_ready(void)
+{
+    time_t now;
+    time(&now);
+    return now > 1700000000;   /* after 2023-11: NTP-synced */
+}
+
+void epd_calendar_render_month(uint8_t *bw, uint8_t *red,
+                               int year, int month, int today_day)
+{
+    ensure_tz();
+
+    if (month < 1) { month += 12; year--; }
+    if (month > 12) { month -= 12; year++; }
+
+    int fw    = day_of_week(year, month, 1);
+    int dim   = days_in_month(year, month);
+    int nrows = (fw + dim + 6) / 7;
+
+    memset(bw, 0xFF, EPD_BUF_SIZE);
+    memset(red, 0x00, EPD_BUF_SIZE);
+    g_bw = bw;
+    g_red = red;
+
+    u8g2_font_t font;
+    memset(&font, 0, sizeof(font));
+    font.draw_hv_line = u8g2_draw_hv_line;
+
+    /* 表头农历参照日:本月=今天;浏览月=该月 1 日(用户裁决 10-31) */
+    struct Lunar_Date lunar_ref;
+    int lunar_day = (today_day > 0) ? today_day : 1;
+    LUNAR_SolarToLunar(&lunar_ref, year, month, lunar_day);
+
+    bool large = (EPD_HEIGHT >= 400);
+    int margin = 6;
+    int cell_w = (EPD_WIDTH - margin * 2) / 7;
+
+    int header_y = large ? 38 : 28;
+    draw_date_header(&font, year, month, header_y, &lunar_ref);
+
+    int wh_y = large ? 44 : 32;
+    int wh_h = large ? 30 : 22;
+    draw_week_header(&font, margin, wh_y, cell_w);
+
+    draw_month_days(&font, margin, wh_y + wh_h, today_day, fw, dim, nrows);
+}
+
+void epd_calendar_render(uint8_t *bw, uint8_t *red)
+{
+    ensure_tz();
     int year, month, today;
     if (epd_calendar_time_ready()) {
         time_t now;
@@ -261,32 +305,5 @@ void epd_calendar_render(uint8_t *bw, uint8_t *red)
         month = month_from_str(mstr);
         today = mday;
     }
-    int fw    = day_of_week(year, month, 1);
-    int dim   = days_in_month(year, month);
-    int nrows = (fw + dim + 6) / 7;
-
-    memset(bw, 0xFF, EPD_BUF_SIZE);
-    memset(red, 0x00, EPD_BUF_SIZE);
-    g_bw = bw;
-    g_red = red;
-
-    u8g2_font_t font;
-    memset(&font, 0, sizeof(font));
-    font.draw_hv_line = u8g2_draw_hv_line;
-
-    struct Lunar_Date lunar_today;
-    LUNAR_SolarToLunar(&lunar_today, year, month, today);
-
-    bool large = (EPD_HEIGHT >= 400);
-    int margin = 6;
-    int cell_w = (EPD_WIDTH - margin * 2) / 7;
-
-    int header_y = large ? 38 : 28;
-    draw_date_header(&font, year, month, header_y, &lunar_today);
-
-    int wh_y = large ? 44 : 32;
-    int wh_h = large ? 30 : 22;
-    draw_week_header(&font, margin, wh_y, cell_w);
-
-    draw_month_days(&font, margin, wh_y + wh_h, today, fw, dim, nrows);
+    epd_calendar_render_month(bw, red, year, month, today);
 }
