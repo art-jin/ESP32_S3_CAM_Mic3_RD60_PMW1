@@ -78,19 +78,17 @@ static void send_buf(const uint8_t *buf, int len)
     }
 }
 
-/* UC8179 needs a 0x71 (FLG) command before each BUSY pin read. */
+/* BUSY pin: LOW = busy on all panels. UC8179 family requires the 0x71 (FLG)
+ * command before each pin read — confirmed by the Waveshare 4.2b-V2 protocol
+ * (pengwon/epd42, bench-proven on the same P420016-MF1-A panel). SSD1683 has
+ * no FLG and must NOT receive it (an intermediate edit did exactly that and
+ * garbled the 4.2 panel — 上黑下红花屏, measured 2026-11-04). */
 static int read_busy(void)
 {
 #if defined(EPD_PANEL_5IN83)
-    /* GxEPD2_583c_Z83 (this panel's known-good driver) reads the pin
-     * directly, LOW = busy — the 0x71 FLG write was dropped 2026-11-04:
-     * it is a live command on this GD7965 firmware and firing it dozens
-     * of times per refresh is a state-corruption suspect. */
-    return gpio_get_level(PIN_BUSY);
-#else
     send_cmd(0x71);
-    return gpio_get_level(PIN_BUSY);
 #endif
+    return gpio_get_level(PIN_BUSY);
 }
 
 /* GPIO + one-time SPI setup shared by all entry points. */
@@ -312,6 +310,151 @@ void epd_sleep(void)
     wait_busy2(2000);
     send_cmd(0x07);
     send_data(0xA5);
+}
+
+#elif defined(EPD_PANEL_42_V2)
+
+/* ====== 4.2" 400x300 tri-color P420016-MF1-A (ESL salvage, anan bench
+ * 2026-11-04). SSD1683-style command set with THREE divergences measured by
+ * Admin-233/displayDrivers epd4in2b_V2 (bench-proven on this exact panel,
+ * see xfox.fun/archives/1750):
+ *   1. BUSY polarity INVERTED: HIGH = busy, LOW = idle (and no 0x71 FLG)
+ *   2. NO 0x01 driver-output-control (misconfigures this COG's gate scan)
+ *   3. extra 0x21 (display update control) ← 0x80 0x80
+ * Planes 0x24/0x26, update 0x22←0xF7 + 0x20 — same as the SSD1683 branch. */
+
+static void hw_reset(void)
+{
+    gpio_set_level(PIN_RES, 1);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    gpio_set_level(PIN_RES, 0);
+    esp_rom_delay_us(2000);
+    gpio_set_level(PIN_RES, 1);
+    vTaskDelay(pdMS_TO_TICKS(200));
+}
+
+/* This panel: HIGH = busy. Wait for the idle (LOW) level. */
+static bool wait_idle(int cap_ms)
+{
+    int ms = 0;
+    while (gpio_get_level(PIN_BUSY)) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        ms += 10;
+        if (ms > cap_ms) return false;
+    }
+    return true;
+}
+
+static void set_ram_window(void)
+{
+    send_cmd(0x11);               /* data entry: X inc, Y inc */
+    send_data(0x03);
+    send_cmd(0x44);               /* x window: bytes 0..49 */
+    send_data(0x00);
+    send_data((EPD_WIDTH / 8) - 1);
+    send_cmd(0x45);               /* y window: 0..299 */
+    send_data(0x00); send_data(0x00);
+    send_data((EPD_HEIGHT - 1) & 0xFF);
+    send_data((EPD_HEIGHT - 1) >> 8);
+    send_cmd(0x4E);               /* cursor (0,0) */
+    send_data(0x00);
+    send_cmd(0x4F);
+    send_data(0x00); send_data(0x00);
+}
+
+static bool start_update_and_wait(void)
+{
+    send_cmd(0x22);               /* OTP full refresh */
+    send_data(0xF7);
+    send_cmd(0x20);
+    /* Two-phase wait (ArtInk58 bench invariant): busy assert can lag by
+     * seconds on tri-color LUTs — a single immediate poll reads "idle"
+     * during the assert window and returns early, the next frame then
+     * writes into a refreshing panel and the image lands wrap-shifted
+     * (measured: calendar header at lower-middle, 2026-11-04). */
+    bool engaged = false;
+    for (int ms = 0; ms < 15000; ms += 10) {
+        if (gpio_get_level(PIN_BUSY)) { engaged = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    bool done = wait_idle(120000);
+    evlog_record(EV_EPD, EPD_PHASE_UPDATE_ENGAGED, engaged ? 1 : 0);
+    return done;
+}
+
+/* This COG advances its write pointer across refresh cycles and never
+ * auto-wraps to the window origin (0x24 does not home the counter, and
+ * lone 0x4E/0x4F re-sends don't stick after a refresh). Only a full
+ * reset+SWRESET+window run zeros it — the boot render is always correct,
+ * every later frame wraps shifted (calendar header to lower-middle,
+ * measured 2026-11-04). So: re-init before every frame. At the 30 s
+ * refresh cadence the ~1 s cost is free. */
+static bool panel_reinit(void)
+{
+    hw_reset();
+    wait_idle(5000);
+    send_cmd(0x12);               /* SW reset */
+    if (!wait_idle(15000)) return false;
+    set_ram_window();
+    send_cmd(0x3C);
+    send_data(0x05);
+    send_cmd(0x18);
+    send_data(0x80);
+    send_cmd(0x21);
+    send_data(0x80);
+    send_data(0x80);
+    wait_idle(5000);
+    return true;
+}
+
+bool epd_init(void)
+{
+    ensure_buses();
+    if (!panel_reinit()) {
+        ESP_LOGE(TAG, "no idle after SW reset — check power/wiring (BUSY=%d)",
+                 read_busy());
+        evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, read_busy());
+        return false;
+    }
+    ESP_LOGI(TAG, "P420016 4.2 V2 init done");
+    evlog_record(EV_EPD, EPD_PHASE_INIT_OK, read_busy());
+    return true;
+}
+
+void epd_clear(void)
+{
+    uint8_t *buf = malloc(EPD_BUF_SIZE);
+    if (!buf) return;
+    panel_reinit();
+    memset(buf, 0xFF, EPD_BUF_SIZE);
+    send_cmd(0x24);               /* BW plane: all white */
+    send_buf(buf, EPD_BUF_SIZE);
+    send_cmd(0x26);               /* RED plane: wire 1 = no-red here */
+    send_buf(buf, EPD_BUF_SIZE);
+    free(buf);
+    start_update_and_wait();
+}
+
+void epd_display(const uint8_t *bw, const uint8_t *red)
+{
+    static uint8_t inv[4096];     /* wire 0=red / 1=white ⇒ invert our red */
+    panel_reinit();
+    send_cmd(0x24);
+    send_buf(bw, EPD_BUF_SIZE);
+    send_cmd(0x26);
+    for (int off = 0; off < EPD_BUF_SIZE; off += sizeof(inv)) {
+        int n = EPD_BUF_SIZE - off;
+        if (n > (int)sizeof(inv)) n = sizeof(inv);
+        for (int i = 0; i < n; i++) inv[i] = ~red[off + i];
+        send_buf(inv, n);
+    }
+    start_update_and_wait();
+}
+
+void epd_sleep(void)
+{
+    send_cmd(0x10);
+    send_data(0x01);
 }
 
 #else
