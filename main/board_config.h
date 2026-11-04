@@ -42,6 +42,11 @@
      * Panel: 4.2" Hink-E042A48-A1 400x300 (SSD1683) — the default variant;
      * define EPD_PANEL_5IN83 instead for the 5.83" FPC-8601B UC8179 panel. */
     #define ENABLE_EPD          1
+    /* 5.83" 648x480 build for anan (安安) — the 4th neck, first 5.83 panel
+     * (2026-11-04). Compile-time switch per docs/74 §7.4 P0 (临时 define);
+     * the runtime dual-panel single firmware (§7.1, NVS epd_panel key)
+     * replaces it in M5. greywolf's 4.2 reflash = comment this out. */
+    #define EPD_PANEL_5IN83     1
     #define EPD_SCK_GPIO        4
     #define EPD_SDO_GPIO        5    /* ESP MOSI -> adapter SDO/DIN */
     #define EPD_DC_GPIO         6

@@ -23,6 +23,12 @@
 
 static uint8_t *g_bw, *g_red;
 
+/* 放大绘制(74 §7.4 P2, 5.83 吋):与 epd_pages.c v3 同款机制 — 缩放只作用于
+ * 字形像素,原点 (g_ox,g_oy) 不缩放。仅日期数字用 2x(36px,老爹可读性),
+ * 表头/农历行维持 1x。 */
+static int g_scale = 1;
+static int g_ox = 0, g_oy = 0;
+
 static void set_pixel(uint8_t *bw, uint8_t *red, int x, int y, int color)
 {
     if (x < 0 || x >= EPD_WIDTH || y < 0 || y >= EPD_HEIGHT) return;
@@ -49,12 +55,13 @@ static void u8g2_draw_hv_line(u8g2_font_t *u, int16_t x, int16_t y,
                                int16_t len, uint8_t dir, uint16_t color)
 {
     int c = (color == U_RED) ? CLR_RED : (color == U_WHITE) ? CLR_WHITE : CLR_BLACK;
-    for (int i = 0; i < len; i++) {
-        switch (dir) {
-            case 0: set_pixel(g_bw, g_red, x + i, y, c); break;
-            case 1: set_pixel(g_bw, g_red, x, y + i, c); break;
-        }
-    }
+    for (int i = 0; i < len; i++)
+        for (int dy = 0; dy < g_scale; dy++)
+            for (int dx = 0; dx < g_scale; dx++) {
+                int px = g_ox + (int)(dir == 0 ? x + i : x) * g_scale + dx;
+                int py = g_oy + (int)(dir == 0 ? y : y + i) * g_scale + dy;
+                set_pixel(g_bw, g_red, px, py, c);
+            }
 }
 
 static uint16_t utf8_next(const char **s)
@@ -82,6 +89,20 @@ static int16_t draw_utf8(u8g2_font_t *font, int16_t x, int16_t y, const char *s)
         x += dx;
     }
     return x;
+}
+
+/* 字形空间局部坐标 → 经 g_scale 放大画到 (x,y)(同 epd_pages draw_text)。 */
+static int16_t draw_utf8_scaled(u8g2_font_t *font, int x, int y,
+                                const char *s, int scale)
+{
+    g_ox = x; g_oy = y; g_scale = scale;
+    int16_t fx = 0, fy = 0;
+    while (*s) {
+        uint16_t cp = utf8_next(&s);
+        fx += u8g2_DrawGlyph(font, fx, fy, cp);
+    }
+    g_scale = 1;
+    return x + fx * scale;
 }
 
 static int16_t get_utf8_width(u8g2_font_t *font, const char *s)
@@ -188,9 +209,13 @@ static void draw_week_header(u8g2_font_t *font, int x0, int y, int cell_w)
 static void draw_month_days(u8g2_font_t *font, int x0, int y,
                              int today, int fw, int dim, int nrows)
 {
+    bool large = (EPD_HEIGHT >= 400);
+    /* 5.83 吋(648×480):数字 2x(18px→36px,物理幅面大,老爹远看友好);
+     * sq(今天黑底块)随之 34→52,须与 epd_pages.c apply_month_decor 同步。 */
+    int ns = large ? 2 : 1;
     int bw = (EPD_WIDTH - x0 * 2) / 7;
     int bh = (EPD_HEIGHT - y - 4) / nrows;
-    int sq = (EPD_HEIGHT >= 400) ? 34 : 30;
+    int sq = large ? 52 : 30;
 
     u8g2_SetBackgroundColor(font, U_WHITE);
     u8g2_SetFontMode(font, 0);
@@ -215,14 +240,14 @@ static void draw_month_days(u8g2_font_t *font, int x0, int y,
             u8g2_SetFont(font, u8g2_font_helvB18_tn);
             u8g2_SetFontMode(font, 1);
             u8g2_SetForegroundColor(font, U_WHITE);
-            int nw = get_utf8_width(font, num_buf);
-            draw_utf8(font, cx - nw / 2, cy + 6, num_buf);
+            int nw = get_utf8_width(font, num_buf) * ns;
+            draw_utf8_scaled(font, cx - nw / 2, cy + 6 * ns, num_buf, ns);
             u8g2_SetFontMode(font, 0);
         } else {
             u8g2_SetFont(font, u8g2_font_helvB18_tn);
             u8g2_SetForegroundColor(font, weekend ? U_RED : U_BLACK);
-            int nw = get_utf8_width(font, num_buf);
-            draw_utf8(font, cx - nw / 2, cy + 6, num_buf);
+            int nw = get_utf8_width(font, num_buf) * ns;
+            draw_utf8_scaled(font, cx - nw / 2, cy + 6 * ns, num_buf, ns);
         }
     }
 }

@@ -666,6 +666,9 @@ static void apply_month_decor(uint8_t *bw, uint8_t *red,
     g_bw = bw; g_red = red;
 
     bool large = (EPD_HEIGHT >= 400);
+    /* 数字 2x + sq 52 与 epd_calendar.c draw_month_days 同步(5.83 吋,
+     * 擦除块/重画字号不同步会留 1x 残影)。 */
+    int ns = large ? 2 : 1;
     int margin = 6;
     int wh_y = large ? 44 : 32;
     int wh_h = large ? 30 : 22;
@@ -677,7 +680,7 @@ static void apply_month_decor(uint8_t *bw, uint8_t *red,
     int nrows = (fw + dim + 6) / 7;
     int colw = (EPD_WIDTH - margin * 2) / 7;
     int rowh = (EPD_HEIGHT - wh_y - wh_h - 4) / nrows;
-    int sq = large ? 34 : 30;
+    int sq = large ? 52 : 30;
 
     const cJSON *td = cJSON_GetObjectItem(month_obj, "todo_days");
     if (cJSON_IsArray(td)) {
@@ -725,8 +728,8 @@ static void apply_month_decor(uint8_t *bw, uint8_t *red,
                 char nb[8];
                 snprintf(nb, sizeof(nb), "%u", (unsigned)(uint8_t)day);
                 u8g2_SetForegroundColor(&font, U_RED);
-                int nw = text_w(&font, nb, 1);
-                draw_text(&font, cx - nw / 2, cy + 6, nb, 1);
+                int nw = text_w(&font, nb, ns);
+                draw_text(&font, cx - nw / 2, cy + 6 * ns, nb, ns);
             }
         }
         const cJSON *wd = cJSON_GetObjectItem(month_obj, "workdays");
@@ -747,8 +750,8 @@ static void apply_month_decor(uint8_t *bw, uint8_t *red,
                 char nb[8];
                 snprintf(nb, sizeof(nb), "%u", (unsigned)(uint8_t)day);
                 u8g2_SetForegroundColor(&font, U_BLACK);
-                int nw = text_w(&font, nb, 1);
-                draw_text(&font, cx - nw / 2, cy + 6, nb, 1);
+                int nw = text_w(&font, nb, ns);
+                draw_text(&font, cx - nw / 2, cy + 6 * ns, nb, ns);
             }
         }
     }
@@ -871,7 +874,10 @@ static void render_todo_table(uint8_t *bw, uint8_t *red, const char *payload)
     draw_title_bar(&font, title);
 
     const int top = TITLE_H + 4, hdr_h = 26;
-    const int c1 = 64, c2 = 122, x_end = EPD_WIDTH - 1;
+    /* 列边界随幅面:400 宽定的是 64/122,648 宽下等比放大,事项列吃满余宽 */
+    const int c1 = (EPD_WIDTH >= 600) ? 100 : 64;
+    const int c2 = (EPD_WIDTH >= 600) ? 190 : 122;
+    const int x_end = EPD_WIDTH - 1;
     int avail = EPD_HEIGHT - 3 - (top + hdr_h);
     int max_rows = avail / 26;               /* 最密 26px/行 */
     if (max_rows > 12) max_rows = 12;

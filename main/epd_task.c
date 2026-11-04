@@ -35,41 +35,26 @@ static epd_result_t s_result;   /* latest run snapshot, read by REST */
 
 const epd_result_t *epd_last_result(void) { return &s_result; }
 
-/* Resolution-relative tri-color card: edge bars prove span+orientation,
- * center squares prove both planes and both colors. Bench tool only. */
+/* Quadrant calibration card (2026-11-04 anan 5.83 bring-up, v1.4 adapter):
+ * TL=BLACK, TR=RED, BL=white, BR=BLACK. One readout pins plane polarity,
+ * placement and orientation. Bench tool only. */
 static void draw_test_pattern(uint8_t *bw, uint8_t *red)
 {
     memset(bw, 0xFF, EPD_BUF_SIZE);
     memset(red, 0x00, EPD_BUF_SIZE);
     int cx = EPD_WIDTH / 2, cy = EPD_HEIGHT / 2;
-    struct { int x, y, w, h, c; } r[] = {
-        {0, 0, EPD_WIDTH, 40, BLACK},
-        {0, EPD_HEIGHT - 40, EPD_WIDTH, 40, RED},
-        {0, 0, 40, EPD_HEIGHT, BLACK},
-        {EPD_WIDTH - 40, 0, 40, EPD_HEIGHT, RED},
-        {cx - 40, cy - 40, 80, 80, RED},
-    };
-    for (unsigned k = 0; k < sizeof(r) / sizeof(r[0]); k++) {
-        for (int y = r[k].y; y < r[k].y + r[k].h && y < EPD_HEIGHT; y++) {
-            for (int x = r[k].x; x < r[k].x + r[k].w && x < EPD_WIDTH; x++) {
-                int idx = y * (EPD_WIDTH / 8) + x / 8;
-                uint8_t bit = 1u << (7 - x % 8);
-                if (r[k].c == BLACK) { bw[idx] &= ~bit; red[idx] &= ~bit; }
-                else                 { bw[idx] &= ~bit; red[idx] |= bit; }
+    for (int y = 0; y < EPD_HEIGHT; y++) {
+        for (int x = 0; x < EPD_WIDTH; x++) {
+            int idx = y * (EPD_WIDTH / 8) + x / 8;
+            uint8_t bit = 1u << (7 - x % 8);
+            if (y < cy) {
+                if (x < cx) bw[idx] &= ~bit;                       /* TL black */
+                else { bw[idx] &= ~bit; red[idx] |= bit; }         /* TR red   */
+            } else if (x >= cx) {
+                bw[idx] &= ~bit;                                   /* BR black */
             }
         }
     }
-    /* black frame around the red square */
-    int fx = cx - 50, fy = cy - 50, fw = 100, fh = 100;
-    for (int y = fy; y < fy + fh; y++)
-        for (int x = fx; x < fx + fw; x++) {
-            bool edge = (x < fx + 4 || x >= fx + fw - 4 ||
-                         y < fy + 4 || y >= fy + fh - 4);
-            if (!edge) continue;
-            int idx = y * (EPD_WIDTH / 8) + x / 8;
-            bw[idx] &= ~(1u << (7 - x % 8));
-            red[idx] &= ~(1u << (7 - x % 8));
-        }
 }
 
 static int day_key(void)

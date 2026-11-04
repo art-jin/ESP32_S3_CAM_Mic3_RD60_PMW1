@@ -82,9 +82,15 @@ static void send_buf(const uint8_t *buf, int len)
 static int read_busy(void)
 {
 #if defined(EPD_PANEL_5IN83)
-    send_cmd(0x71);
-#endif
+    /* GxEPD2_583c_Z83 (this panel's known-good driver) reads the pin
+     * directly, LOW = busy — the 0x71 FLG write was dropped 2026-11-04:
+     * it is a live command on this GD7965 firmware and firing it dozens
+     * of times per refresh is a state-corruption suspect. */
     return gpio_get_level(PIN_BUSY);
+#else
+    send_cmd(0x71);
+    return gpio_get_level(PIN_BUSY);
+#endif
 }
 
 /* GPIO + one-time SPI setup shared by all entry points. */
@@ -185,25 +191,17 @@ static bool start_update_and_wait(void)
     return engaged;
 }
 
-bool epd_init(void)
+/* Z83 behavior: ALL registers before power-on, and the register block is
+ * re-armed before EVERY frame write (GxEPD2's writeImage unconditionally
+ * runs _InitDisplay+_PowerOn) — this firmware forgets/misapplies scan
+ * geometry otherwise (measured 2026-11-04). */
+static bool load_registers_and_power_on(void)
 {
-    ensure_buses();
-    hw_reset();
-
     send_cmd(0x01);               /* power setting */
     send_data(0x07);
     send_data(0x07);
     send_data(0x3F);
     send_data(0x3F);
-
-    send_cmd(0x04);               /* power on */
-    vTaskDelay(pdMS_TO_TICKS(100));
-    if (!wait_release(10000)) {
-        ESP_LOGE(TAG, "PON no busy response — power/panel issue");
-        evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, read_busy());
-        return false;
-    }
-
     send_cmd(0x00);               /* panel setting: tri-color OTP */
     send_data(0x0F);
     send_cmd(0x61);               /* resolution 648x480 */
@@ -218,33 +216,94 @@ bool epd_init(void)
     send_data(0x07);
     send_cmd(0x60);               /* TCON */
     send_data(0x22);
+    send_cmd(0x04);               /* power on — LAST, after all registers */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (!wait_release(10000)) {
+        ESP_LOGE(TAG, "PON no busy response — power/panel issue");
+        return false;
+    }
+    return true;
+}
 
+bool epd_init(void)
+{
+    ensure_buses();
+    hw_reset();
+    if (!load_registers_and_power_on()) {
+        evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, read_busy());
+        return false;
+    }
     ESP_LOGI(TAG, "UC8179 init done");
     evlog_record(EV_EPD, EPD_PHASE_INIT_OK, read_busy());
     return true;
+}
+
+/* Bisect 2026-11-04: the 0x91/0x90/0x92 window wrapper (GxEPD2_583c_Z83
+ * style) FREEZES this panel's RAM — with it, three consecutive full refresh
+ * cycles with different payloads (calendar/white-clear/all-black) left the
+ * optical state untouched. Without it (v1..v3 builds) data demonstrably
+ * reached RAM (screen tracked content changes). Wrapper dropped while the
+ * Z83 register order + per-frame power cycle stay. */
+static void set_ram_window_5(void)
+{
+    /* GD7965-standard addressing (never exercised on this path before —
+     * v1..v7 all relied on reset defaults): entry mode + h/v window +
+     * x/y cursor homing. If the firmware boots with a non-zero cursor,
+     * every plane write starts at the wrong RAM cell = content-independent
+     * banding. Mirrors the SSD1683 path's set_ram_window role. */
+    send_cmd(0x11);               /* data entry: X inc, Y inc */
+    send_data(0x03);
+    send_cmd(0x44);               /* horizontal window (byte addr) 0..80 */
+    send_data(0x00);
+    send_data((EPD_WIDTH / 8) - 1);
+    send_cmd(0x45);               /* vertical window 0..479 */
+    send_data(0x00); send_data(0x00);
+    send_data((EPD_HEIGHT - 1) & 0xFF);
+    send_data((EPD_HEIGHT - 1) >> 8);
+    send_cmd(0x4E);               /* x counter = 0 */
+    send_data(0x00);
+    send_cmd(0x4F);               /* y counter = 0 */
+    send_data(0x00); send_data(0x00);
 }
 
 void epd_clear(void)
 {
     uint8_t *buf = malloc(EPD_BUF_SIZE);
     if (!buf) return;
+    load_registers_and_power_on();
+    set_ram_window_5();
     memset(buf, 0xFF, EPD_BUF_SIZE);
-    send_cmd(0x10);               /* OLD plane: all white */
+    send_cmd(0x10);               /* BW plane: all white */
     send_buf(buf, EPD_BUF_SIZE);
-    memset(buf, 0x00, EPD_BUF_SIZE);
-    send_cmd(0x13);               /* NEW plane: none */
+    memset(buf, 0xFF, EPD_BUF_SIZE);   /* red plane inverted: 0xFF = no red */
+    send_cmd(0x13);
     send_buf(buf, EPD_BUF_SIZE);
     free(buf);
     start_update_and_wait();
+    send_cmd(0x02);               /* power off (Z83 display() flow) */
+    wait_release(5000);
 }
 
 void epd_display(const uint8_t *bw, const uint8_t *red)
 {
+    /* v1.4 adapter swap 2026-11-04: clean data path at last; all-black probe
+     * (red plane all 0x00) painted the WHOLE screen red ⇒ this panel's 0x13
+     * wire semantics are 0=red / 1=white ⇒ invert our red buffer on send. */
+    static uint8_t inv[4096];
+    load_registers_and_power_on();
+    set_ram_window_5();
     send_cmd(0x10);
     send_buf(bw, EPD_BUF_SIZE);
     send_cmd(0x13);
-    send_buf(red, EPD_BUF_SIZE);
+    for (int off = 0; off < EPD_BUF_SIZE; off += sizeof(inv)) {
+        int n = EPD_BUF_SIZE - off;
+        if (n > (int)sizeof(inv)) n = sizeof(inv);
+        for (int i = 0; i < n; i++) inv[i] = ~red[off + i];
+        send_buf(inv, n);
+    }
     start_update_and_wait();
+    send_cmd(0x02);               /* power off (Z83 display() flow) */
+    wait_release(5000);
 }
 
 void epd_sleep(void)
