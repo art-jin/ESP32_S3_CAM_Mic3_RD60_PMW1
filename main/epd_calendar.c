@@ -83,6 +83,12 @@ static uint16_t utf8_next(const char **s)
 
 static int16_t draw_utf8(u8g2_font_t *font, int16_t x, int16_t y, const char *s)
 {
+    /* 2026-11-05 修复:本路径给 DrawGlyph 传绝对坐标,但 P2 的 g_ox/g_oy
+     * 锚点会在 u8g2_draw_hv_line 里被二次叠加——上一帧 draw_utf8_scaled
+     * (日期数字)留下的锚点(页底"30"处)把次帧 draw_date_header /
+     * draw_week_header 的文字整体推到页底("年月农历显示在 30 下一行"
+     * 实录);开机首帧锚点为零才显得正常。绝对坐标路径必须清零锚点。 */
+    g_ox = 0; g_oy = 0; g_scale = 1;
     while (*s) {
         uint16_t cp = utf8_next(&s);
         int16_t dx = u8g2_DrawGlyph(font, x, y, cp);
@@ -102,6 +108,7 @@ static int16_t draw_utf8_scaled(u8g2_font_t *font, int x, int y,
         fx += u8g2_DrawGlyph(font, fx, fy, cp);
     }
     g_scale = 1;
+    g_ox = 0; g_oy = 0;   /* 锚点即用即清,绝对坐标路径(draw_utf8)不再踩残留 */
     return x + fx * scale;
 }
 

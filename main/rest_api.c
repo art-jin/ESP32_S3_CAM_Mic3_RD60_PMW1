@@ -21,6 +21,7 @@
 #include "mqtt_publisher.h"
 #include "epd_task.h"
 #include "epd.h"
+#include "epd_pages.h"
 
 static const char *TAG = "rest";
 static httpd_handle_t s_server = NULL;
@@ -828,6 +829,65 @@ static esp_err_t handler_epd_status(httpd_req_t *req)
     return send_json_ok(req, buf);
 }
 
+/* GET /api/epd/frame?device_id=XXXX&step=3 — 帧缓冲 ASCII 转储(调试):
+ * 把当前生效 (mode,payload) 纯渲染进影子缓冲(不刷屏),bw/red 平面
+ * 降采样成文本('#'=黑 'R'=红 '.'=白)。用于屏上结果 vs 固件所画的
+ * 像素级对账(2026-11-05 anan 月历错位排查)。seq 渲染前后各读一次,
+ * 变了说明与 EPD task 并发渲染过,重试一次。 */
+static esp_err_t handler_epd_frame(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    int step = 3;
+    char q[64] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        char v[8] = {0};
+        if (httpd_query_key_value(q, "step", v, sizeof(v)) == ESP_OK) {
+            step = atoi(v);
+            if (step < 1) step = 1;
+            if (step > 8) step = 8;
+        }
+    }
+
+    size_t hdr_cap = 1100;
+    size_t w = EPD_WIDTH / step, h = EPD_HEIGHT / step;
+    size_t cap = hdr_cap + w * h + h + 16;
+    uint8_t *bw = malloc(EPD_BUF_SIZE);
+    uint8_t *red = malloc(EPD_BUF_SIZE);
+    char *out = malloc(cap);
+    if (!bw || !red || !out) {
+        free(bw); free(red); free(out);
+        return send_error(req, 500, "oom", "frame dump buffers");
+    }
+
+    int mode = -1;
+    for (int tries = 0; tries < 2; tries++) {
+        uint32_t seq0 = display_mode_seq();
+        mode = display_mode_active();
+        epd_pages_render(mode, display_mode_payload(), bw, red);
+        if (display_mode_seq() == seq0) break;
+    }
+
+    int n = snprintf(out, hdr_cap, "mode=%s step=%d payload=%.1000s\n",
+                     display_mode_name(mode), step,
+                     display_mode_payload());
+    char *p = out + n;
+    for (int y = 0; y + step <= EPD_HEIGHT; y += step) {
+        for (int x = 0; x + step <= EPD_WIDTH; x += step) {
+            int idx = y * (EPD_WIDTH / 8) + x / 8;
+            uint8_t bit = 1u << (7 - x % 8);
+            *p++ = (red[idx] & bit) ? 'R'
+                 : ((bw[idx] & bit) ? '.' : '#');
+        }
+        *p++ = '\n';
+    }
+    *p = '\0';
+
+    httpd_resp_set_type(req, HTTPD_TYPE_TEXT);
+    esp_err_t e = httpd_resp_send(req, out, p - out);
+    free(bw); free(red); free(out);
+    return e;
+}
+
 /* POST /api/point?device_id=XXXX
  * Body: {"dir":"7oc"} or {"angle":30}
  * Only works in COMMAND mode. Rate-limited to 1 per 500ms.
@@ -989,7 +1049,7 @@ esp_err_t rest_api_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 6144;
-    config.max_uri_handlers = 24;   /* 19 registered (M1 +2); over-limit handlers fail silently */
+    config.max_uri_handlers = 24;   /* 20 registered (M1 +2, frame dump +1); over-limit handlers fail silently */
     config.task_priority = configMAX_PRIORITIES - 5;
 
     esp_err_t err = httpd_start(&s_server, &config);
@@ -1043,6 +1103,9 @@ esp_err_t rest_api_start(void)
     static const httpd_uri_t uri_epd_status = {
         .uri = "/api/epd/status", .method = HTTP_GET, .handler = handler_epd_status
     };
+    static const httpd_uri_t uri_epd_frame = {
+        .uri = "/api/epd/frame", .method = HTTP_GET, .handler = handler_epd_frame
+    };
     static const httpd_uri_t uri_epd_sweep = {
         .uri = "/api/epd/sweep", .method = HTTP_POST, .handler = handler_epd_sweep
     };
@@ -1072,6 +1135,7 @@ esp_err_t rest_api_start(void)
     httpd_register_uri_handler(s_server, &uri_epd_recover);
     httpd_register_uri_handler(s_server, &uri_epd_status);
     httpd_register_uri_handler(s_server, &uri_epd_sweep);
+    httpd_register_uri_handler(s_server, &uri_epd_frame);
     httpd_register_uri_handler(s_server, &uri_point);
     httpd_register_uri_handler(s_server, &uri_shake);
     httpd_register_uri_handler(s_server, &uri_options);
