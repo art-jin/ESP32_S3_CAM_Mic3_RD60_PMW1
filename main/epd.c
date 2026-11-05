@@ -85,9 +85,6 @@ static void send_buf(const uint8_t *buf, int len)
  * garbled the 4.2 panel — 上黑下红花屏, measured 2026-11-04). */
 static int read_busy(void)
 {
-#if defined(EPD_PANEL_5IN83)
-    send_cmd(0x71);
-#endif
     return gpio_get_level(PIN_BUSY);
 }
 
@@ -168,7 +165,17 @@ static bool wait_busy2(int engage_ms)
 
 #if defined(EPD_PANEL_5IN83)
 
-/* ============ UC8179/GD7965: 5.83" 648x480 FPC-8601B (ArtInk4 port) ==== */
+/* ===== 5.83" 648x480 BWR HINK-E0583A01 (Hanshow ESL salvage, GD7965) ====
+ * 2026-11-04 evening REWRITE by the 4.2-methodology: every earlier session
+ * waited LOW=busy, which the sibling P420016 4.2" proved inverted on this
+ * salvage ecosystem — so all prior observations (banding patterns, "frozen
+ * RAM", polarity deductions) were taken with mistimed writes and are void.
+ * Now: LOW=busy two-phase waits confirmed (HIGH-busy probe failed PON
+ * instantly — polarity does NOT transfer from the 4.2 sibling), plus the
+ * part that never got tested: full per-frame reinit WITH the RES pulse
+ * (hw_reset + all registers + power-on) to zero the write pointer (the COG
+ * drift the 4.2" had), Z83-faithful planes (0x10 BW 1=white, 0x13 red
+ * 1=red, no inversion), no 0x71 FLG. */
 
 static void hw_reset(void)
 {
@@ -180,19 +187,33 @@ static void hw_reset(void)
     vTaskDelay(pdMS_TO_TICKS(200));
 }
 
+/* LOW = busy on this panel (Z83 reference + all-day PON evidence; the 4.2
+ * sibling's inversion does NOT transfer). Idle = HIGH. */
+static bool wait_idle_5(int cap_ms)
+{
+    int ms = 0;
+    while (!gpio_get_level(PIN_BUSY)) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        ms += 10;
+        if (ms > cap_ms) return false;
+    }
+    return true;
+}
+
 static bool start_update_and_wait(void)
 {
     send_cmd(0x12);               /* master update */
-    bool engaged = wait_busy2(15000);
+    bool engaged = false;
+    for (int ms = 0; ms < 15000; ms += 10) {   /* engage: LOW within 15 s */
+        if (!gpio_get_level(PIN_BUSY)) { engaged = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    bool done = wait_idle_5(120000);           /* release: HIGH within 120 s */
     evlog_record(EV_EPD, EPD_PHASE_UPDATE_ENGAGED, engaged ? 1 : 0);
-    if (!engaged) vTaskDelay(pdMS_TO_TICKS(22000));   /* ~20 s refresh */
-    return engaged;
+    return done;
 }
 
-/* Z83 behavior: ALL registers before power-on, and the register block is
- * re-armed before EVERY frame write (GxEPD2's writeImage unconditionally
- * runs _InitDisplay+_PowerOn) — this firmware forgets/misapplies scan
- * geometry otherwise (measured 2026-11-04). */
+/* Registers BEFORE power-on (Z83 order); re-armed before EVERY frame. */
 static bool load_registers_and_power_on(void)
 {
     send_cmd(0x01);               /* power setting */
@@ -216,39 +237,24 @@ static bool load_registers_and_power_on(void)
     send_data(0x22);
     send_cmd(0x04);               /* power on — LAST, after all registers */
     vTaskDelay(pdMS_TO_TICKS(100));
-    if (!wait_release(10000)) {
-        ESP_LOGE(TAG, "PON no busy response — power/panel issue");
+    if (!wait_idle_5(10000)) {
+        ESP_LOGE(TAG, "PON no idle — power/panel issue");
         return false;
     }
     return true;
 }
 
-bool epd_init(void)
+/* Per-frame reinit: zero the write pointer + reload scan geometry (the COG
+ * drifts both across refreshes, exactly like the 4.2 sibling). */
+static bool panel_reinit_5(void)
 {
-    ensure_buses();
     hw_reset();
-    if (!load_registers_and_power_on()) {
-        evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, read_busy());
-        return false;
-    }
-    ESP_LOGI(TAG, "UC8179 init done");
-    evlog_record(EV_EPD, EPD_PHASE_INIT_OK, read_busy());
-    return true;
+    return load_registers_and_power_on();
 }
 
-/* Bisect 2026-11-04: the 0x91/0x90/0x92 window wrapper (GxEPD2_583c_Z83
- * style) FREEZES this panel's RAM — with it, three consecutive full refresh
- * cycles with different payloads (calendar/white-clear/all-black) left the
- * optical state untouched. Without it (v1..v3 builds) data demonstrably
- * reached RAM (screen tracked content changes). Wrapper dropped while the
- * Z83 register order + per-frame power cycle stay. */
+/* GD7965 addressing: entry mode + h/v window + cursor homing. */
 static void set_ram_window_5(void)
 {
-    /* GD7965-standard addressing (never exercised on this path before —
-     * v1..v7 all relied on reset defaults): entry mode + h/v window +
-     * x/y cursor homing. If the firmware boots with a non-zero cursor,
-     * every plane write starts at the wrong RAM cell = content-independent
-     * banding. Mirrors the SSD1683 path's set_ram_window role. */
     send_cmd(0x11);               /* data entry: X inc, Y inc */
     send_data(0x03);
     send_cmd(0x44);               /* horizontal window (byte addr) 0..80 */
@@ -264,50 +270,53 @@ static void set_ram_window_5(void)
     send_data(0x00); send_data(0x00);
 }
 
+bool epd_init(void)
+{
+    ensure_buses();
+    if (!panel_reinit_5()) {
+        evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, read_busy());
+        return false;
+    }
+    ESP_LOGI(TAG, "UC8179 init done");
+    evlog_record(EV_EPD, EPD_PHASE_INIT_OK, read_busy());
+    return true;
+}
+
 void epd_clear(void)
 {
     uint8_t *buf = malloc(EPD_BUF_SIZE);
     if (!buf) return;
-    load_registers_and_power_on();
+    panel_reinit_5();
     set_ram_window_5();
     memset(buf, 0xFF, EPD_BUF_SIZE);
     send_cmd(0x10);               /* BW plane: all white */
     send_buf(buf, EPD_BUF_SIZE);
-    memset(buf, 0xFF, EPD_BUF_SIZE);   /* red plane inverted: 0xFF = no red */
-    send_cmd(0x13);
+    send_cmd(0x13);               /* RED plane: none */
+    memset(buf, 0x00, EPD_BUF_SIZE);
     send_buf(buf, EPD_BUF_SIZE);
     free(buf);
     start_update_and_wait();
     send_cmd(0x02);               /* power off (Z83 display() flow) */
-    wait_release(5000);
+    wait_idle_5(5000);
 }
 
 void epd_display(const uint8_t *bw, const uint8_t *red)
 {
-    /* v1.4 adapter swap 2026-11-04: clean data path at last; all-black probe
-     * (red plane all 0x00) painted the WHOLE screen red ⇒ this panel's 0x13
-     * wire semantics are 0=red / 1=white ⇒ invert our red buffer on send. */
-    static uint8_t inv[4096];
-    load_registers_and_power_on();
+    panel_reinit_5();
     set_ram_window_5();
     send_cmd(0x10);
     send_buf(bw, EPD_BUF_SIZE);
     send_cmd(0x13);
-    for (int off = 0; off < EPD_BUF_SIZE; off += sizeof(inv)) {
-        int n = EPD_BUF_SIZE - off;
-        if (n > (int)sizeof(inv)) n = sizeof(inv);
-        for (int i = 0; i < n; i++) inv[i] = ~red[off + i];
-        send_buf(inv, n);
-    }
+    send_buf(red, EPD_BUF_SIZE);
     start_update_and_wait();
     send_cmd(0x02);               /* power off (Z83 display() flow) */
-    wait_release(5000);
+    wait_idle_5(5000);
 }
 
 void epd_sleep(void)
 {
     send_cmd(0x02);
-    wait_busy2(2000);
+    wait_idle_5(5000);
     send_cmd(0x07);
     send_data(0xA5);
 }

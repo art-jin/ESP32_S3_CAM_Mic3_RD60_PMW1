@@ -50,7 +50,9 @@
      *   - EPD_PANEL_5IN83    5.83" HINK-E0583A01 Hanshow salvage, GD7965 —
      *                        PARKED: divergent COG sequence, docs/74 §7
      * Exactly one variant may be defined. */
-    /* 2026-11-04: Admin-233 实测版重写 42_V2 — BUSY 极性反(HIGH=busy)/无0x01/加0x21 */
+    /* 2026-11-05: 5.83 单元判定本体故障(RAM 不保持写入, 10+ 驱动变体无结构
+     * 输出, 详见 docs/74) — 台架切回 4.2 P420016。5.83 驱动框架已磨好,
+     * 待新屏到手直接用。 */
     #define EPD_PANEL_42_V2       1
     // #define EPD_PANEL_5IN83     1
     #define EPD_SCK_GPIO        4
