@@ -51,6 +51,10 @@ int64_t     display_mode_ttl_remaining_ms(void);
 /* EPD task 启动时注册自己,show() 通过 notify 唤醒渲染。 */
 void display_mode_set_notify_task(void *task_handle);
 
+/* R2 屏持久化(78 §4.4):开机重放 NVS 缓存的当前页+overlay 暂存(跨日
+ * overlay 不复活)。EPD task 在注册 notify 后、首渲染前调用。 */
+void display_mode_replay_nvs(void);
+
 /* MQTT cmd/display 通道接线(mqtt_publisher 下行 → show)。 */
 void display_mode_mqtt_init(void);
 

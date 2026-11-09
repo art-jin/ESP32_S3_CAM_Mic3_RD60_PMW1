@@ -115,6 +115,7 @@ static void epd_task(void *arg)
     }
 
     display_mode_set_notify_task(xTaskGetCurrentTaskHandle());
+    display_mode_replay_nvs();   /* R2:重启恢复上次显示(跨日 overlay 过期) */
 
     int shown_day = -1;
     int last_mode = -1;

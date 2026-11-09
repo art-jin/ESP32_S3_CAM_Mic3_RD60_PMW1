@@ -3,8 +3,11 @@
  * 到 display_mode_show();EPD task 用 (mode,seq) 检测变更,TTL 到期由
  * display_mode_active() 的询问方自行发现(EPD park 超时取 min(ttl,1h))。
  * docs/74 M2：最近一次 calendar_overlay 载荷暂存于 s_overlay_json，临时
- * 页 TTL 到期回退时套用 → 月历常驻主页始终带节假日/待办框线(重启丢失，
- * 等 guardian 次推恢复；NVS 持久化留 M1.5)。 */
+ * 页 TTL 到期回退时套用 → 月历常驻主页始终带节假日/待办框线。
+ * R2 屏持久化(78 §4.4,2026-11-09)：当前页+overlay 暂存落 NVS(ns "dmode")，
+ * 重启后 display_mode_replay_nvs() 恢复；overlay 按天戳记沿用原日戳——
+ * 隔天不复活(回退纯月历,等云补推)。写入在锁内(载荷推送低频,EPD 渲染
+ * 本身百秒级,毫秒级 flash 写不构成争用)。 */
 #include "display_mode.h"
 
 #include <string.h>
@@ -15,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "cJSON.h"
+#include "nvs.h"
 
 #include "mqtt_publisher.h"
 
@@ -94,6 +98,104 @@ static void lock_init(void)
     if (!s_lock) s_lock = xSemaphoreCreateMutex();
 }
 
+/* ---- R2 NVS 持久化 ---- */
+
+static void nvs_save_locked(int mode, const char *payload)
+{
+    nvs_handle_t h;
+    if (nvs_open("dmode", NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "nvs open failed (skip persist)");
+        return;
+    }
+    bool ok = true;
+    if (nvs_set_u8(h, "mode", (uint8_t)mode) != ESP_OK) ok = false;
+    if (nvs_set_blob(h, "json", payload, strlen(payload) + 1) != ESP_OK)
+        ok = false;
+    if (s_overlay_json[0]) {
+        if (nvs_set_blob(h, "ovl", s_overlay_json,
+                         strlen(s_overlay_json) + 1) != ESP_OK) ok = false;
+        if (nvs_set_i32(h, "ovl_day", s_overlay_day) != ESP_OK) ok = false;
+    }
+    if (nvs_commit(h) != ESP_OK) ok = false;
+    nvs_close(h);
+    if (!ok) ESP_LOGW(TAG, "nvs persist partial failure");
+}
+
+/* 开机重放(EPD task 注册 notify 后、首渲染前调用):
+ * - 恢复 overlay 暂存但保留原日戳——隔天不复活,诚实过期;
+ * - 当前页恢复:calendar_overlay 跨日不重放(回退纯月历);临时页恢复后
+ *   TTL 重新起算,到期自然回退。 */
+void display_mode_replay_nvs(void)
+{
+    lock_init();
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) != pdTRUE) return;
+
+    nvs_handle_t h;
+    if (nvs_open("dmode", NVS_READONLY, &h) != ESP_OK) {
+        xSemaphoreGive(s_lock);
+        return;                       /* 无缓存=首次烧录,正常走默认月历 */
+    }
+    uint8_t mode = DMODE_CALENDAR;
+    size_t len = 0;
+    char *json = NULL, *ovl = NULL;
+    int32_t ovl_day = -1;
+    bool have = nvs_get_u8(h, "mode", &mode) == ESP_OK;
+    if (have) {
+        if (nvs_get_blob(h, "json", NULL, &len) == ESP_OK && len > 1 &&
+            len <= DISPLAY_PAYLOAD_MAX) {
+            json = malloc(len);
+            if (json && nvs_get_blob(h, "json", json, &len) == ESP_OK &&
+                json[len - 1] != '\0') json[len - 1] = '\0';
+        }
+        size_t olen = 0;
+        if (nvs_get_blob(h, "ovl", NULL, &olen) == ESP_OK && olen > 1 &&
+            olen <= DISPLAY_PAYLOAD_MAX) {
+            ovl = malloc(olen);
+            if (ovl && nvs_get_blob(h, "ovl", ovl, &olen) == ESP_OK &&
+                ovl[olen - 1] != '\0') ovl[olen - 1] = '\0';
+            nvs_get_i32(h, "ovl_day", &ovl_day);
+        }
+    }
+    nvs_close(h);
+
+    if (!json || !json[0]) { free(json); free(ovl); xSemaphoreGive(s_lock); return; }
+    if (mode >= DMODE_COUNT) { free(json); free(ovl); xSemaphoreGive(s_lock); return; }
+
+    /* 先恢复暂存(原日戳) */
+    if (ovl && ovl[0]) {
+        strncpy(s_overlay_json, ovl, DISPLAY_PAYLOAD_MAX - 1);
+        s_overlay_json[DISPLAY_PAYLOAD_MAX - 1] = '\0';
+        s_overlay_day = (int)ovl_day;
+    }
+    free(ovl);
+
+    bool replay_page = true;
+    if (mode == DMODE_CALENDAR_OVERLAY && s_overlay_day != today_key())
+        replay_page = false;          /* 跨日:让 active() 回退纯月历 */
+
+    if (replay_page) {
+        strncpy(s_payload, json, DISPLAY_PAYLOAD_MAX - 1);
+        s_payload[DISPLAY_PAYLOAD_MAX - 1] = '\0';
+        s_mode = (int)mode;
+        if (mode == DMODE_CALENDAR || mode == DMODE_CALENDAR_OVERLAY) {
+            s_expires_ms = -1;
+            s_ttl_req_sec = DISPLAY_TTL_DEFAULT_SEC;
+        } else {
+            s_ttl_req_sec = DISPLAY_TTL_MIN_SEC;   /* 原 ttl 不落盘,按最小 */
+            s_expires_ms = TTL_PENDING;
+        }
+        /* 暂存保持上面恢复的原日戳(勿走 stash_overlay_from 重打今日戳) */
+        s_seq++;
+        ESP_LOGI(TAG, "replay from nvs: %s (overlay_day=%d)",
+                 k_names[s_mode], s_overlay_day);
+    } else {
+        ESP_LOGI(TAG, "replay: overlay stale (day %d != %d) -> plain calendar",
+                 s_overlay_day, today_key());
+    }
+    free(json);
+    xSemaphoreGive(s_lock);
+}
+
 bool display_mode_show(int mode, const char *payload_json, int ttl_sec)
 {
     if (mode < 0 || mode >= DMODE_COUNT) return false;
@@ -117,6 +219,7 @@ bool display_mode_show(int mode, const char *payload_json, int ttl_sec)
         s_expires_ms = TTL_PENDING;   /* 上屏完成(display_mode_rendered)起算 */
     }
     s_seq++;
+    nvs_save_locked(mode, s_payload);   /* R2:当前页+overlay 暂存落 NVS */
 
     TaskHandle_t task = s_epd_task;
     xSemaphoreGive(s_lock);
