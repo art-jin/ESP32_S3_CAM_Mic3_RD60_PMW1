@@ -91,6 +91,7 @@ static char s_topic_events[64];
 static char s_topic_online[64];
 static char s_topic_cfg[64];
 static char s_topic_display[64];
+static char s_topic_ota[64];
 static char s_client_id[24];
 static bool s_started;
 static mqtt_cfg_cb_t s_cfg_cb;
@@ -112,6 +113,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         esp_mqtt_client_subscribe(s_client, s_topic_cfg, 1);
         /* 74-M1:云端/机身刷屏下行通道。 */
         esp_mqtt_client_subscribe(s_client, s_topic_display, 1);
+        esp_mqtt_client_subscribe(s_client, s_topic_ota, 1);
         ESP_LOGI(TAG, "connected; online=1 published; cfg sub %s; "
                  "heap free=%u min=%u", s_topic_cfg,
                  (unsigned)esp_get_free_heap_size(),
