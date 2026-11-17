@@ -25,6 +25,7 @@ void epd_task_start(void);
 /* Re-run init+clear+test pattern on the parked task (bench bring-up;
  * called from REST /api/epd/test). */
 void epd_task_test_trigger(void);
+void epd_task_plane_test(int which);
 
 /* Snapshot of the latest/ongoing run (never NULL). */
 const epd_result_t *epd_last_result(void);

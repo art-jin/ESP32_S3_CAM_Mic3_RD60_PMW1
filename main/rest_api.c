@@ -1,4 +1,5 @@
 #include "rest_api.h"
+#include <esp_heap_caps.h>
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -735,6 +736,82 @@ static esp_err_t handler_radar_reset(httpd_req_t *req)
 /* POST /api/epd/test?device_id=XXXX — re-run e-ink init + clear + tri-color
  * test pattern (~30 s) on the parked EPD task. Bench bring-up helper: no
  * reboot needed to see the EPD serial diagnostics. */
+
+/* GET /api/memtest?device_id=XXXX&bytes=38880 — PSRAM/integrity probe:
+ * write a known pattern to a >MALLOC_ALWAYSINTERNAL block (i.e. PSRAM when
+ * SPIRAM_USE_MALLOC is on), read it back, count mismatches. 2026-11-17
+ * MENGOR 5.83 花屏 hunt: host-replica render is clean, so the corruption
+ * lives in the device-side buffer path (suspect: CPU<->PSRAM). */
+static esp_err_t handler_memtest(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    int nbytes = 38880;
+    char q[64] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        char v[12] = {0};
+        if (httpd_query_key_value(q, "bytes", v, sizeof(v)) == ESP_OK)
+            nbytes = atoi(v);
+        if (nbytes < 4096) nbytes = 4096;
+        if (nbytes > 256 * 1024) nbytes = 256 * 1024;
+    }
+
+    uint8_t *buf = malloc(nbytes);
+    if (!buf)
+        return send_error(req, 500, "oom", "memtest malloc");
+    bool in_psram = esp_ptr_external_ram(buf);
+
+    uint32_t errors = 0;
+    int first_bad = -1;
+    uint8_t first_got = 0, first_want = 0;
+    /* pass 1: position-derived pattern */
+    for (int i = 0; i < nbytes; i++)
+        buf[i] = (uint8_t)((i * 7 + (i >> 8)) & 0xFF);
+    for (int i = 0; i < nbytes; i++) {
+        uint8_t want = (uint8_t)((i * 7 + (i >> 8)) & 0xFF);
+        if (buf[i] != want) {
+            errors++;
+            if (first_bad < 0) { first_bad = i; first_got = buf[i]; first_want = want; }
+        }
+    }
+    /* pass 2: 0xFF/0x00 */
+    uint32_t errors2 = 0;
+    memset(buf, 0xFF, nbytes);
+    for (int i = 0; i < nbytes; i++) if (buf[i] != 0xFF) errors2++;
+    memset(buf, 0x00, nbytes);
+    for (int i = 0; i < nbytes; i++) if (buf[i] != 0x00) errors2++;
+    free(buf);
+
+    char out[256];
+    snprintf(out, sizeof(out),
+             "{\"ok\":true,\"bytes\":%d,\"psram\":%s,"
+             "\"pattern_errors\":%lu,\"ff00_errors\":%lu,"
+             "\"first_bad\":%d,\"got\":%u,\"want\":%u}",
+             nbytes, in_psram ? "true" : "false",
+             (unsigned long)errors, (unsigned long)errors2,
+             first_bad, first_got, first_want);
+    return send_json_ok(req, out);
+}
+
+/* POST /api/epd/plane?device_id=X&w=1|r=1 — plane-selective test pattern:
+ * renders draw_test_pattern and sends BW-only / RED-only / both. */
+static esp_err_t handler_epd_plane(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    int which = 0;
+    char q[64] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        char v[4] = {0};
+        if (httpd_query_key_value(q, "w", v, sizeof(v)) == ESP_OK && v[0] == '1')
+            which = 1;
+        if (httpd_query_key_value(q, "r", v, sizeof(v)) == ESP_OK && v[0] == '1')
+            which = 2;
+    }
+    epd_task_plane_test(which);
+    char jb[80];
+    snprintf(jb, sizeof(jb), "{\"ok\":true,\"which\":%d,\"eta_s\":30}", which);
+    return send_json_ok(req, jb);
+}
+
 static esp_err_t handler_epd_test(httpd_req_t *req)
 {
     if (!check_auth(req)) return ESP_OK;
@@ -860,11 +937,59 @@ static esp_err_t handler_epd_frame(httpd_req_t *req)
     }
 
     int mode = -1;
+    char qall[80] = {0};
+    /* ?mode=N 覆盖：渲染指定模式（0=纯月历 无 overlay 装饰）——
+     * 2026-11-17 花屏二分：隔离 epd_calendar 本体 vs apply_month_decor。 */
+    char qmode[8] = {0};
+    if (httpd_req_get_url_query_str(req, qall, sizeof(qall)) == ESP_OK &&
+        httpd_query_key_value(qall, "mode", qmode, sizeof(qmode)) == ESP_OK) {
+        mode = atoi(qmode);
+        epd_pages_render(mode, display_mode_payload(), bw, red);
+    } else {
     for (int tries = 0; tries < 2; tries++) {
         uint32_t seq0 = display_mode_seq();
         mode = display_mode_active();
         epd_pages_render(mode, display_mode_payload(), bw, red);
         if (display_mode_seq() == seq0) break;
+    }
+    }
+
+    /* ?blank=1: after render, wipe both planes to white/none — if the dump
+     * STILL shows junk, those addresses return stuck values regardless of
+     * writes (bad PSRAM region). 2026-11-17 hunt. */
+    char qblank[4] = {0};
+    if (httpd_req_get_url_query_str(req, qall, sizeof(qall)) == ESP_OK &&
+        httpd_query_key_value(qall, "blank", qblank, sizeof(qblank)) == ESP_OK &&
+        qblank[0] == '1') {
+        memset(bw, 0xFF, EPD_BUF_SIZE);
+        memset(red, 0x00, EPD_BUF_SIZE);
+    }
+
+    /* &hex=red|bw&off=N&len=N — raw plane bytes (fingerprint the junk). */
+    char qhex[8] = {0};
+    if (httpd_req_get_url_query_str(req, qall, sizeof(qall)) == ESP_OK &&
+        httpd_query_key_value(qall, "hex", qhex, sizeof(qhex)) == ESP_OK &&
+        (qhex[0] == 'r' || qhex[0] == 'b')) {
+        char v[12] = {0};
+        int off = 0, len = 256;
+        if (httpd_query_key_value(qall, "off", v, sizeof(v)) == ESP_OK) off = atoi(v);
+        if (httpd_query_key_value(qall, "len", v, sizeof(v)) == ESP_OK) len = atoi(v);
+        if (off < 0) off = 0;
+        if (len < 1) len = 1;
+        if (off + len > EPD_BUF_SIZE) len = EPD_BUF_SIZE - off;
+        const uint8_t *src = (qhex[0] == 'r') ? red : bw;
+        httpd_resp_set_type(req, HTTPD_TYPE_TEXT);
+        char lbuf[64];
+        for (int i = 0; i < len; i += 16) {
+            int n2 = snprintf(lbuf, sizeof(lbuf), "%06x ", off + i);
+            for (int j = 0; j < 16 && i + j < len; j++)
+                n2 += snprintf(lbuf + n2, sizeof(lbuf) - n2, "%02x ", src[off + i + j]);
+            lbuf[n2++] = '\n'; lbuf[n2] = 0;
+            httpd_resp_send_chunk(req, lbuf, n2);
+        }
+        httpd_resp_send_chunk(req, NULL, 0);
+        free(bw); free(red); free(out);
+        return ESP_OK;
     }
 
     int n = snprintf(out, hdr_cap, "mode=%s step=%d payload=%.1000s\n",
@@ -1106,6 +1231,12 @@ esp_err_t rest_api_start(void)
     static const httpd_uri_t uri_epd_frame = {
         .uri = "/api/epd/frame", .method = HTTP_GET, .handler = handler_epd_frame
     };
+    static const httpd_uri_t uri_memtest = {
+        .uri = "/api/memtest", .method = HTTP_GET, .handler = handler_memtest
+    };
+    static const httpd_uri_t uri_epd_plane = {
+        .uri = "/api/epd/plane", .method = HTTP_POST, .handler = handler_epd_plane
+    };
     static const httpd_uri_t uri_epd_sweep = {
         .uri = "/api/epd/sweep", .method = HTTP_POST, .handler = handler_epd_sweep
     };
@@ -1135,6 +1266,8 @@ esp_err_t rest_api_start(void)
     httpd_register_uri_handler(s_server, &uri_epd_recover);
     httpd_register_uri_handler(s_server, &uri_epd_status);
     httpd_register_uri_handler(s_server, &uri_epd_sweep);
+    httpd_register_uri_handler(s_server, &uri_memtest);
+    httpd_register_uri_handler(s_server, &uri_epd_plane);
     httpd_register_uri_handler(s_server, &uri_epd_frame);
     httpd_register_uri_handler(s_server, &uri_point);
     httpd_register_uri_handler(s_server, &uri_shake);

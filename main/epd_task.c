@@ -3,6 +3,7 @@
  * /api/epd/test 调试三色卡不变。 */
 #include "epd_task.h"
 #include "board_config.h"
+#include "esp_heap_caps.h"
 
 #if ENABLE_EPD
 
@@ -32,6 +33,17 @@ enum { WHITE = 0, BLACK, RED };
 
 static TaskHandle_t s_epd_task;
 static epd_result_t s_result;   /* latest run snapshot, read by REST */
+
+/* Framebuffers via plain malloc → PSRAM (38880 > MALLOC_ALWAYSINTERNAL).
+ * PSRAM placement is SAFE: the earlier "phantom writer" corruption was the
+ * epd.h split-geometry bug (renderer writing a 400-wide layout into a
+ * 648-wide buffer — the unread tail was uninitialized junk, not a writer);
+ * and SPI DMA never touches these buffers (send_buf bounces through an
+ * internal staging buffer in epd.c). Do NOT make these static/internal:
+ * 77.7 KB of internal .bss starves the TLS handshake (mbedtls -0x008D,
+ * MQTT down — 2026-11-17 实录). */
+static uint8_t *bw_buf;
+static uint8_t *red_buf;
 
 const epd_result_t *epd_last_result(void) { return &s_result; }
 
@@ -97,16 +109,18 @@ static void epd_task(void *arg)
     }
     s_result.init_ok = true;
 
-    uint8_t *bw = malloc(EPD_BUF_SIZE);
-    uint8_t *red = malloc(EPD_BUF_SIZE);
-    if (!bw || !red) {
+    /* (buffers now at file scope for epd_task_plane_test) */
+
+    bw_buf = malloc(EPD_BUF_SIZE);
+    red_buf = malloc(EPD_BUF_SIZE);
+    if (!bw_buf || !red_buf) {
         ESP_LOGE(TAG, "no heap for framebuffers");
         evlog_record(EV_EPD, EPD_PHASE_NO_HEAP, 0);
-        free(bw); free(red);
         s_result.running = false;
         vTaskDelete(NULL);
         return;
     }
+    uint8_t *bw = bw_buf, *red = red_buf;
 
     /* Wait for NTP so the calendar page shows the right day (the panel
      * keeps its old image meanwhile — e-ink's killer feature). */
@@ -194,3 +208,13 @@ const epd_result_t *epd_last_result(void)
 }
 
 #endif
+
+
+/* Plane-selective bench test (2026-11-17): render the test pattern into the
+ * static buffers and push with the requested plane filter. */
+void epd_task_plane_test(int which);
+void epd_task_plane_test(int which)
+{
+    draw_test_pattern(bw_buf, red_buf);
+    epd_display_planes(bw_buf, red_buf, which);
+}

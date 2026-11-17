@@ -63,16 +63,27 @@ static void send_data(uint8_t d)
     spi_device_polling_transmit(spi, &t);
 }
 
+/* Framebuffer staging: SPI DMA must only read INTERNAL RAM. With
+ * SPIRAM_USE_MALLOC and MALLOC_ALWAYSINTERNAL=16384, the 5.83" 38880-byte
+ * plane buffers land in PSRAM — DMA reads from PSRAM come back
+ * cache-incoherent (busy handshake + refresh healthy, pixels garbled;
+ * 2026-11-17 MENGOR 花屏实录, two full attempts). Plain CPU loads from
+ * PSRAM are fine, so bounce every chunk through this internal staging
+ * buffer before handing it to the SPI engine. Cost: one 4 KB memcpy per
+ * chunk — negligible against a 20 s panel refresh. */
+static uint8_t s_tx_stage[4096] __attribute__((aligned(4)));
+
 static void send_buf(const uint8_t *buf, int len)
 {
     gpio_set_level(PIN_DC, 1);
     int off = 0;
     while (off < len) {
         int chunk = len - off;
-        if (chunk > 4096) chunk = 4096;
+        if (chunk > sizeof(s_tx_stage)) chunk = sizeof(s_tx_stage);
+        memcpy(s_tx_stage, buf + off, chunk);
         spi_transaction_t t = {0};
         t.length = chunk * 8;
-        t.tx_buffer = buf + off;
+        t.tx_buffer = s_tx_stage;
         spi_device_polling_transmit(spi, &t);
         off += chunk;
     }
@@ -114,7 +125,7 @@ static void ensure_buses(void)
             .max_transfer_sz = 4096,
         };
         spi_device_interface_config_t dev = {
-            .clock_speed_hz = 2000000,
+            .clock_speed_hz = 1000000,   /* 2026-11-17: 2 MHz garbles long 5.83" streams in the noisy neck env (PSRAM octal on 35-37 + I2S + radar); 1 MHz for margin */
             .mode = 0,
             .spics_io_num = PIN_CS,
             .queue_size = 1,
@@ -165,34 +176,37 @@ static bool wait_busy2(int engage_ms)
 
 #if defined(EPD_PANEL_5IN83)
 
-/* ===== 5.83" 648x480 BWR HINK-E0583A01 (Hanshow ESL salvage, GD7965) ====
- * 2026-11-04 evening REWRITE by the 4.2-methodology: every earlier session
- * waited LOW=busy, which the sibling P420016 4.2" proved inverted on this
- * salvage ecosystem — so all prior observations (banding patterns, "frozen
- * RAM", polarity deductions) were taken with mistimed writes and are void.
- * Now: LOW=busy two-phase waits confirmed (HIGH-busy probe failed PON
- * instantly — polarity does NOT transfer from the 4.2 sibling), plus the
- * part that never got tested: full per-frame reinit WITH the RES pulse
- * (hw_reset + all registers + power-on) to zero the write pointer (the COG
- * drift the 4.2" had), Z83-faithful planes (0x10 BW 1=white, 0x13 red
- * 1=red, no inversion), no 0x71 FLG. */
+/* ===== 5.83" 648x480 BWR, UC8179-V2 protocol (Waveshare epd5in83b_V2) ====
+ * 2026-11-17: NEW panel (the 2026-11-04 Hanshow salvage was judged dead —
+ * RAM not holding writes — see acf4d65). Protocol empirically verified on
+ * the new panel in ArtInk58 (same GOOUUU board, same EPD pins):
+ *   - red plane is 0x13 (0x26 write silently ignored — NOT the SSD1683 map)
+ *   - 0x50 VCOM/data interval takes TWO bytes (0x11 0x07); one byte leaves
+ *     every band speckled
+ *   - a 0x71 FLG command must precede EACH BUSY pin read (branch-local —
+ *     the 42_V2 and SSD1683 panels must NOT receive it)
+ *   - init order: power setting → power-on → remaining registers
+ * Planes 0x10 BW (1=white) / 0x13 red (1=red), update 0x12, LOW=busy.
+ * Per-frame reinit (hw_reset + registers + PON) retained from the dead-
+ * panel rewrite: COG write-pointer drift insurance, same as the 4.2". */
 
 static void hw_reset(void)
 {
     gpio_set_level(PIN_RES, 1);
     vTaskDelay(pdMS_TO_TICKS(200));
     gpio_set_level(PIN_RES, 0);
-    esp_rom_delay_us(10000);   /* ~10 ms */
+    vTaskDelay(pdMS_TO_TICKS(20));   /* ArtInk58-verified pulse */
     gpio_set_level(PIN_RES, 1);
     vTaskDelay(pdMS_TO_TICKS(200));
 }
 
-/* LOW = busy on this panel (Z83 reference + all-day PON evidence; the 4.2
- * sibling's inversion does NOT transfer). Idle = HIGH. */
+/* LOW = busy. Each pin read is preceded by 0x71 FLG (V2 requirement). */
 static bool wait_idle_5(int cap_ms)
 {
     int ms = 0;
-    while (!gpio_get_level(PIN_BUSY)) {
+    while (1) {
+        send_cmd(0x71);
+        if (gpio_get_level(PIN_BUSY)) break;
         vTaskDelay(pdMS_TO_TICKS(10));
         ms += 10;
         if (ms > cap_ms) return false;
@@ -205,6 +219,7 @@ static bool start_update_and_wait(void)
     send_cmd(0x12);               /* master update */
     bool engaged = false;
     for (int ms = 0; ms < 15000; ms += 10) {   /* engage: LOW within 15 s */
+        send_cmd(0x71);
         if (!gpio_get_level(PIN_BUSY)) { engaged = true; break; }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -213,7 +228,8 @@ static bool start_update_and_wait(void)
     return done;
 }
 
-/* Registers BEFORE power-on (Z83 order); re-armed before EVERY frame. */
+/* ArtInk58-verified order: power setting → PON → remaining registers;
+ * re-armed before EVERY frame. */
 static bool load_registers_and_power_on(void)
 {
     send_cmd(0x01);               /* power setting */
@@ -221,26 +237,45 @@ static bool load_registers_and_power_on(void)
     send_data(0x07);
     send_data(0x3F);
     send_data(0x3F);
-    send_cmd(0x00);               /* panel setting: tri-color OTP */
-    send_data(0x0F);
-    send_cmd(0x61);               /* resolution 648x480 */
-    send_data(0x02);
-    send_data(0x88);
-    send_data(0x01);
-    send_data(0xE0);
-    send_cmd(0x15);               /* VGL/VGH option */
-    send_data(0x00);
-    send_cmd(0x50);               /* VCOM + data interval */
-    send_data(0x11);
-    send_data(0x07);
-    send_cmd(0x60);               /* TCON */
-    send_data(0x22);
-    send_cmd(0x04);               /* power on — LAST, after all registers */
+    send_cmd(0x04);               /* power on — EARLY, before config regs */
     vTaskDelay(pdMS_TO_TICKS(100));
     if (!wait_idle_5(10000)) {
         ESP_LOGE(TAG, "PON no idle — power/panel issue");
         return false;
     }
+    send_cmd(0x00);               /* panel setting: BW OTP LUT */
+    send_data(0x0F);
+    send_cmd(0x61);               /* resolution — derive from geometry */
+    send_data((EPD_WIDTH >> 8) & 0xFF);
+    send_data(EPD_WIDTH & 0xFF);
+    send_data((EPD_HEIGHT >> 8) & 0xFF);
+    send_data(EPD_HEIGHT & 0xFF);
+    send_cmd(0x15);               /* VGL/VGH option */
+    send_data(0x00);
+    send_cmd(0x50);               /* VCOM + data interval — TWO bytes (V2) */
+    send_data(0x11);
+    send_data(0x07);
+    send_cmd(0x60);               /* TCON */
+    send_data(0x22);
+    /* 2026-11-17: 显式全屏窗口+退出局部模式。这块屏今天早期跑过带窗口
+     * 命令的实验固件+DC 抖动期的垃圾命令流，COG 可能锁存了窄窗口/
+     * partial-in 状态（左侧月历正确+右侧 1/3 永不更新的形态吻合）。
+     * ArtInk58 的极简 init 无窗口命令——但它的屏从未被污染过。每次
+     * init 强制拉回已知全屏态，防锁存残留。 */
+    send_cmd(0x92);               /* partial-window OUT */
+    send_cmd(0x11);               /* data entry: X inc, Y inc */
+    send_data(0x03);
+    send_cmd(0x44);               /* X window: FULL width (bytes) */
+    send_data(0x00);
+    send_data((EPD_WIDTH / 8) - 1);
+    send_cmd(0x45);               /* Y window: FULL height */
+    send_data(0x00); send_data(0x00);
+    send_data((EPD_HEIGHT - 1) & 0xFF);
+    send_data((EPD_HEIGHT - 1) >> 8);
+    send_cmd(0x4E);               /* X cursor = 0 */
+    send_data(0x00);
+    send_cmd(0x4F);               /* Y cursor = 0 */
+    send_data(0x00); send_data(0x00);
     return true;
 }
 
@@ -252,23 +287,12 @@ static bool panel_reinit_5(void)
     return load_registers_and_power_on();
 }
 
-/* GD7965 addressing: entry mode + h/v window + cursor homing. */
-static void set_ram_window_5(void)
-{
-    send_cmd(0x11);               /* data entry: X inc, Y inc */
-    send_data(0x03);
-    send_cmd(0x44);               /* horizontal window (byte addr) 0..80 */
-    send_data(0x00);
-    send_data((EPD_WIDTH / 8) - 1);
-    send_cmd(0x45);               /* vertical window 0..479 */
-    send_data(0x00); send_data(0x00);
-    send_data((EPD_HEIGHT - 1) & 0xFF);
-    send_data((EPD_HEIGHT - 1) >> 8);
-    send_cmd(0x4E);               /* x counter = 0 */
-    send_data(0x00);
-    send_cmd(0x4F);               /* y counter = 0 */
-    send_data(0x00); send_data(0x00);
-}
+/* 2026-11-17 花屏实录（第一版移植）: 4.2 时代的"保险"——每帧 panel_reinit
+ * + set_ram_window 寻址 + 帧后 0x02 断电——在这块 V2 COG 上全部致命：
+ * BUSY 握手正常、20 s 全刷照走，但像素映射花屏。ArtInk58 在同一块屏上
+ * 的实证序列是极简流：init 一次（复位+寄存器+PON），之后每帧只写
+ * 0x10/0x13 两平面 + 0x12 触发，无 reinit/无窗口/无断电，连续多帧
+ * display 稳定。display 路径必须保持这个最小形态。 */
 
 bool epd_init(void)
 {
@@ -277,7 +301,7 @@ bool epd_init(void)
         evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, read_busy());
         return false;
     }
-    ESP_LOGI(TAG, "UC8179 init done");
+    ESP_LOGI(TAG, "UC8179-V2 init done");
     evlog_record(EV_EPD, EPD_PHASE_INIT_OK, read_busy());
     return true;
 }
@@ -286,8 +310,6 @@ void epd_clear(void)
 {
     uint8_t *buf = malloc(EPD_BUF_SIZE);
     if (!buf) return;
-    panel_reinit_5();
-    set_ram_window_5();
     memset(buf, 0xFF, EPD_BUF_SIZE);
     send_cmd(0x10);               /* BW plane: all white */
     send_buf(buf, EPD_BUF_SIZE);
@@ -296,21 +318,15 @@ void epd_clear(void)
     send_buf(buf, EPD_BUF_SIZE);
     free(buf);
     start_update_and_wait();
-    send_cmd(0x02);               /* power off (Z83 display() flow) */
-    wait_idle_5(5000);
 }
 
 void epd_display(const uint8_t *bw, const uint8_t *red)
 {
-    panel_reinit_5();
-    set_ram_window_5();
     send_cmd(0x10);
     send_buf(bw, EPD_BUF_SIZE);
     send_cmd(0x13);
     send_buf(red, EPD_BUF_SIZE);
     start_update_and_wait();
-    send_cmd(0x02);               /* power off (Z83 display() flow) */
-    wait_idle_5(5000);
 }
 
 void epd_sleep(void)
@@ -319,6 +335,28 @@ void epd_sleep(void)
     wait_idle_5(5000);
     send_cmd(0x07);
     send_data(0xA5);
+}
+
+/* Bench diagnostic (2026-11-17 花屏 hunt): plane-selective display.
+ * which: 0=both planes, 1=BW only (red forced none), 2=RED only (BW forced
+ * white). Isolates whether corruption begins with the second plane write. */
+void epd_display_planes(const uint8_t *bw, const uint8_t *red, int which);
+
+void epd_display_planes(const uint8_t *bw, const uint8_t *red, int which)
+{
+    static uint8_t blank[EPD_BUF_SIZE];
+    if (which == 1) {
+        memset(blank, 0x00, sizeof(blank));
+        red = blank;
+    } else if (which == 2) {
+        memset(blank, 0xFF, sizeof(blank));
+        bw = blank;
+    }
+    send_cmd(0x10);
+    send_buf(bw, EPD_BUF_SIZE);
+    send_cmd(0x13);
+    send_buf(red, EPD_BUF_SIZE);
+    start_update_and_wait();
 }
 
 #elif defined(EPD_PANEL_42_V2)

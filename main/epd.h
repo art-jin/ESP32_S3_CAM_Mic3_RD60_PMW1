@@ -10,6 +10,10 @@
 #ifndef EPD_H
 #define EPD_H
 
+#include "board_config.h"   /* 2026-11-17: 宏可见性自携带——EPD_PANEL_* 由本头
+                              * 自带，杜绝各 .c 因 include 顺序不同而对屏幕几何
+                              * 认知分裂（当日实录：epd.c 活在 400x300 只发左
+                              * 62%，渲染/任务在 648x480——左侧月历右侧残影）。 */
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -29,6 +33,7 @@ bool epd_init(void);
 void epd_clear(void);                              /* white, ~14 s */
 void epd_display(const uint8_t *bw, const uint8_t *red);  /* ~14 s */
 void epd_sleep(void);
+void epd_display_planes(const uint8_t *bw, const uint8_t *red, int which);
 
 /* Wiring self-check (~2 s, repeatable). BUSY is the panel's only feedback
  * line: a RES pulse proves panel power + RES + BUSY; a SW-reset command
