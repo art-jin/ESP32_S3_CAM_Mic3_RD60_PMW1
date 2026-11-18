@@ -266,6 +266,8 @@ void mqtt_publisher_init(void)
         },
         .session.keepalive = 60,
         .network.reconnect_timeout_ms = 5000,
+        .buffer.size = 4096,   /* dash 载荷 ~1000B + MQTT 开销
+                                 * 超 1024 默认值被截断=bad json */
     };
     s_client = esp_mqtt_client_init(&cfg);
     if (!s_client) {
