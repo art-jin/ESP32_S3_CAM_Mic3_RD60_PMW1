@@ -593,6 +593,10 @@ static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
 
     draw_title_bar(&font, "本周服药");
 
+    /* 5.83(≥400h): 日期/槽位标签 2x(32px), 图例 2x, 格子自动放大无需改 */
+    bool large = (EPD_HEIGHT >= 400);
+    int ts = large ? 2 : 1;
+
     cJSON *root = cJSON_Parse(payload);
     cJSON *grid = root ? cJSON_GetObjectItem(root, "medgrid") : NULL;
     cJSON *days = cJSON_IsObject(grid) ? cJSON_GetObjectItem(grid, "days") : NULL;
@@ -600,12 +604,12 @@ static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
     int today_idx = cJSON_IsNumber(today) ? today->valueint : -1;
 
     static const char *slot_name[3] = {"早", "中", "晚"};
-    int legend_h = 24;
-    int top = TITLE_H + 20;
+    int legend_h = large ? 40 : 24;
+    int top = TITLE_H + (large ? 30 : 20);
     int bottom = EPD_HEIGHT - legend_h - 4;
     int left = 6, right = EPD_WIDTH - 6;
     int colw = (right - left) / 7;
-    int rowh = (bottom - top - 14) / 3;
+    int rowh = (bottom - top - (large ? 30 : 14)) / 3;
 
     for (int d = 0; d < 7; d++) {
         int cx0 = left + d * colw;
@@ -627,11 +631,11 @@ static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
         u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
         u8g2_SetFontMode(&font, 1);
         u8g2_SetForegroundColor(&font, (d == today_idx) ? U_RED : U_BLACK);
-        draw_text(&font, cx0 + 4, top + 14, date, 1);
+        draw_text(&font, cx0 + 4, top + 12 * ts, date, ts);
 
         for (int s = 0; s < 3; s++) {
             int x0 = cx0 + 5, x1 = cx0 + colw - 6;
-            int y0 = top + 18 + s * rowh, y1 = y0 + rowh - 5;
+            int y0 = top + (large ? 26 : 18) + s * rowh, y1 = y0 + rowh - 5;
             int fg = CLR_WHITE, bg = CLR_WHITE;
             if (strcmp(slots[s], "taken") == 0) {
                 fill_rect(x0, y0, x1, y1, CLR_BLACK); bg = CLR_BLACK;
@@ -640,14 +644,14 @@ static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
             } else {
                 frame_rect(x0, y0, x1, y1, CLR_BLACK, 2); bg = CLR_WHITE;
             }
-            (void)bg;
+            (void)fg; (void)bg;
             /* 格内早/中/晚:实心格反白 */
             u8g2_SetForegroundColor(&font,
                 (bg == CLR_WHITE) ? U_BLACK : U_WHITE);
-            int tw = text_w(&font, slot_name[s], 1);
+            int tw = text_w(&font, slot_name[s], ts);
             int cell_cx = (x0 + x1) / 2, cell_cy = (y0 + y1) / 2;
-            draw_text(&font, cell_cx - tw / (2 * 1), cell_cy + 7,
-                      slot_name[s], 1);
+            draw_text(&font, cell_cx - tw / (2 * ts),
+                      cell_cy + 7 * ts, slot_name[s], ts);
         }
         /* 今天整列红框高亮 */
         if (d == today_idx)
@@ -899,16 +903,17 @@ static void render_todo_table(uint8_t *bw, uint8_t *red, const char *payload)
 
     draw_title_bar(&font, title);
 
+    /* 5.83 用户裁决(11-18): 保持 1x 字号——大屏价值=多行(12 满编 vs 4.2 的
+     * 7-8 行)+事项列吃满余宽,不做字号放大。列宽 648 专属(c1=100/c2=190)。 */
     const int top = TITLE_H + 4, hdr_h = 26;
-    /* 列边界随幅面:400 宽定的是 64/122,648 宽下等比放大,事项列吃满余宽 */
     const int c1 = (EPD_WIDTH >= 600) ? 100 : 64;
     const int c2 = (EPD_WIDTH >= 600) ? 190 : 122;
     const int x_end = EPD_WIDTH - 1;
     int avail = EPD_HEIGHT - 3 - (top + hdr_h);
-    int max_rows = avail / 26;               /* 最密 26px/行 */
+    int max_rows = avail / 26;
     if (max_rows > 12) max_rows = 12;
     if (n > max_rows) n = max_rows;
-    int row_h = avail / n;                   /* 行距伸展铺满(26..44) */
+    int row_h = avail / n;
     if (row_h > 44) row_h = 44;
     const int bot = top + hdr_h + n * row_h - 1;
 
@@ -927,7 +932,7 @@ static void render_todo_table(uint8_t *bw, uint8_t *red, const char *payload)
     draw_text(&font, c2 + 8, top + 19, "事项", 1);
 
     for (int i = 0; i < n; i++) {
-        int ry = top + hdr_h + i * row_h + row_h / 2 + 8;   /* 16px 字基线 */
+        int ry = top + hdr_h + i * row_h + row_h / 2 + 8;
         /* 用户裁决 10-30: 今天的代办整行红(日期+时间+事项),未来行黑 */
         u8g2_SetForegroundColor(&font, rows[i].today ? U_RED : U_BLACK);
         draw_text(&font, 8, ry, rows[i].date, 1);
