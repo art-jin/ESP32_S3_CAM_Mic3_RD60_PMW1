@@ -441,20 +441,26 @@ typedef struct {
 static void draw_card(u8g2_font_t *font, int x0, int y0, int w, int h,
                       const status_card_t *c)
 {
+    /* 5.83(≥400h): 标签/数值用 wqy16 2x(32px), 副标签 wqy16 1x(16px);
+     * 垂直偏移改比例化填充大卡片; 图标偏移随卡片高度。 */
+    bool large = (EPD_HEIGHT >= 400);
+    int ts = large ? 2 : 1;
+
     if (c->alarm) frame_rect(x0, y0, x0 + w - 1, y0 + h - 1, CLR_RED, 4);
     else          frame_rect(x0, y0, x0 + w - 1, y0 + h - 1, CLR_BLACK, 2);
-    c->icon(x0 + w / 2, y0 + 22);
+    c->icon(x0 + w / 2, y0 + (large ? h * 0.14 : 22));
 
     u8g2_SetBackgroundColor(font, U_WHITE);
     u8g2_SetFontMode(font, 1);
-    u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
+    u8g2_SetFont(font, large ? u8g2_font_wqy16_t_gb2312a
+                             : u8g2_font_wqy12_t_gb2312a);
     u8g2_SetForegroundColor(font, U_BLACK);
-    draw_text(font, x0 + (w - text_w(font, c->label, 1)) / 2,
-              y0 + 48, c->label, 1);
-    /* 数值:按 '-' 切段组装行(每行 ≤13 半角字符,最多 3 行;12px 红字)。
-     * 用户实例: v0.3.0- / supermini-final- / 95-g292c935 三行(10-29 裁决)。 */
+    draw_text(font, x0 + (w - text_w(font, c->label, ts)) / 2,
+              y0 + (large ? h * 0.32 : 48), c->label, ts);
+
     u8g2_SetForegroundColor(font, U_RED);
-    u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
+    u8g2_SetFont(font, large ? u8g2_font_wqy16_t_gb2312a
+                             : u8g2_font_wqy12_t_gb2312a);
     char vlines[3][24];
     int nv = 0;
     {
@@ -471,26 +477,27 @@ static void draw_card(u8g2_font_t *font, int x0, int y0, int w, int h,
         }
         if (nv == 0) nv = 1;
     }
+    int vts = large ? 2 : 1;
     if (strlen(vlines[0]) <= 13 && !vlines[1][0]) {
-        u8g2_SetFont(font, u8g2_font_wqy16_t_gb2312a);
-        int vw = text_w(font, c->value, 1);
-        if (vw > w - 10) {
-            u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
-            vw = text_w(font, c->value, 1);
-        }
-        draw_text(font, x0 + (w - vw) / 2, y0 + h - 30, c->value, 1);
+        int vw = text_w(font, c->value, vts);
+        if (vw > w - 10) vts = 1;   /* 超宽降回 1x */
+        vw = text_w(font, c->value, vts);
+        draw_text(font, x0 + (w - vw) / 2,
+                  y0 + (large ? h * 0.65 : h - 30), c->value, vts);
     } else {
-        int ybase = y0 + h - 16 - 15 * (nv);
+        int ybase = y0 + (large ? h * 0.60 : h - 16 - 15 * nv);
         for (int i = 0; i <= nv && i < 3; i++) {
             if (!vlines[i][0]) break;
-            int lw = text_w(font, vlines[i], 1);
-            draw_text(font, x0 + (w - lw) / 2, ybase + i * 15, vlines[i], 1);
+            int lw = text_w(font, vlines[i], large ? 1 : 1);
+            draw_text(font, x0 + (w - lw) / 2,
+                      ybase + i * (large ? 34 : 15), vlines[i], 1);
         }
     }
-    u8g2_SetFont(font, u8g2_font_wqy12_t_gb2312a);
+    u8g2_SetFont(font, large ? u8g2_font_wqy16_t_gb2312a
+                             : u8g2_font_wqy12_t_gb2312a);
     u8g2_SetForegroundColor(font, U_BLACK);
     draw_text(font, x0 + (w - text_w(font, c->sub, 1)) / 2,
-              y0 + h - 10, c->sub, 1);
+              y0 + h - (large ? 14 : 10), c->sub, 1);
 }
 
 static void render_status(uint8_t *bw, uint8_t *red)
