@@ -209,17 +209,28 @@ static void draw_lines_page(uint8_t *bw, uint8_t *red,
 
     draw_title_bar(&font, title);
 
-    int y = TITLE_H + LINE_H;
+    /* 5.83(EPD_HEIGHT≥400): 消息块垂直居中(微偏上)而非顶部堆叠,
+     * 且全部行 2x 字号——400×300 时顶部起排 1x 即可。 */
+    bool large = (EPD_HEIGHT >= 400);
+    int body_h = 0;
+    for (int i = 0; i < n_lines; i++)
+        body_h += large ? 56 : (i == hero_index ? 56 : LINE_H);
+    int y = TITLE_H + 8;
+    if (large) {
+        int center_gap = (EPD_HEIGHT - TITLE_H - body_h) / 2;
+        if (center_gap > 0) y += center_gap - 12;   /* 微偏上(用户裁决) */
+    }
     for (int i = 0; i < n_lines && y < EPD_HEIGHT - 8; i++) {
         char buf[96];
         strncpy(buf, lines[i], sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
         if (i == hero_index) {
-            draw_body(&font, 14, y + 8, buf, 2, 1);   /* 2x 红色主信息 */
+            draw_body(&font, large ? 24 : 14, y + 8, buf, 2, 1);
             y += 56;
         } else {
-            draw_body(&font, 14, y, buf, BODY_SCALE, 0);
-            y += LINE_H;
+            draw_body(&font, large ? 24 : 14, y, buf,
+                      large ? 2 : BODY_SCALE, 0);
+            y += large ? 56 : LINE_H;
         }
     }
 }
@@ -276,8 +287,9 @@ static void render_lines_from_json(uint8_t *bw, uint8_t *red,
     if (n == 0) strcpy(rows[n++], "(无内容)");
     for (int i = 0; i < n; i++) lines[i] = rows[i];
 
-    /* 天气页专用排版 v3:图标居中上区,主信息(2x红)整行居中于图标下,
-     * 分隔线后为明细行 — 任何行宽都不会出界。 */
+    /* 天气页专用排版 v3→v4:图标居中上区,主信息(2x红)整行居中于图标下,
+     * 分隔线后为明细行 — 任何行宽都不会出界。
+     * 5.83(≥400h)适配(2026-11-17): 垂直偏移改比例化 + 图标放大 + 行距拉伸。 */
     if (hero_index >= 0 && mode_name[0] == 'w' && n > 0) {
         memset(bw, 0xFF, EPD_BUF_SIZE);
         memset(red, 0x00, EPD_BUF_SIZE);
@@ -287,12 +299,16 @@ static void render_lines_from_json(uint8_t *bw, uint8_t *red,
         font.draw_hv_line = u8g2_draw_hv_line;
         draw_title_bar(&font, title);
 
-        draw_weather_icon(rows[0], EPD_WIDTH / 2, TITLE_H + 52);
+        bool large = (EPD_HEIGHT >= 400);
+        int content_h = EPD_HEIGHT - TITLE_H;
+
+        draw_weather_icon(rows[0], EPD_WIDTH / 2,
+                          large ? TITLE_H + content_h * 0.20
+                                : TITLE_H + 52);
 
         char cond[40];
         strncpy(cond, rows[0], sizeof(cond) - 1);
         cond[sizeof(cond) - 1] = 0;
-        /* UTF-8 安全截到 12 字(2x 居中行宽上限) */
         int cnt = 0;
         char *p = cond;
         while (*p && cnt < 12) { p += (*p & 0x80) ? 3 : 1; cnt++; }
@@ -302,16 +318,26 @@ static void render_lines_from_json(uint8_t *bw, uint8_t *red,
         int hw = text_w(&font, cond, hero_scale);
         if (hw > EPD_WIDTH - 24) hero_scale = 1;
         hw = text_w(&font, cond, hero_scale);
-        draw_body(&font, (EPD_WIDTH - hw) / 2, TITLE_H + 148, cond,
+        int hero_y = large ? TITLE_H + content_h * 0.42
+                           : TITLE_H + 148;
+        draw_body(&font, (EPD_WIDTH - hw) / 2, hero_y, cond,
                   hero_scale, 1);
 
-        int div_y = TITLE_H + 162;
+        int div_y = large ? hero_y + 28 : TITLE_H + 162;
         fill_rect(10, div_y, EPD_WIDTH - 10, div_y + 1, CLR_BLACK);
 
-        int y = div_y + 32;
+        /* 明细行:大屏拉伸行距铺满剩余空间(分隔线下留 2 字空隙防划过首行) */
+        int detail_n = n - 1;
+        if (detail_n < 1) detail_n = 1;
+        int avail_h = EPD_HEIGHT - 10 - (div_y + 36);
+        int lh = large ? avail_h / detail_n : LINE_H;
+        if (lh > 60) lh = 60;
+        if (lh < LINE_H) lh = LINE_H;
+        int y = div_y + 36;
         for (int i = 1; i < n && y < EPD_HEIGHT - 10; i++) {
-            draw_body(&font, 14, y, rows[i], BODY_SCALE, 0);
-            y += LINE_H;
+            draw_body(&font, large ? 24 : 14, y, rows[i],
+                      large ? 2 : BODY_SCALE, 0);
+            y += lh;
         }
         return;
     }
