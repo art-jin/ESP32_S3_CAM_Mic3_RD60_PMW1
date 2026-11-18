@@ -17,10 +17,12 @@ enum {
     DMODE_MEDGRID,             /* 3×7 药盒格 */
     DMODE_MSG,                 /* title+lines 确认页 */
     DMODE_MONTH_VIEW,          /* 任意月浏览页(M3.2):month.{year,month}+框线,临时 TTL */
+    DMODE_DASH,                /* 复合 dashboard(5.83 专属):月历+天气+待办+药格 */
     DMODE_COUNT
 };
 
-#define DISPLAY_PAYLOAD_MAX 1024
+/* 74 §7.2: dash 载荷含天气+待办+药格,估 600-800B → 上限 2048 */
+#define DISPLAY_PAYLOAD_MAX 2048
 #define DISPLAY_TTL_DEFAULT_SEC 90
 /* 用户裁决(10-29):非月历内容页至少维持 90s — 全刷本身 ~14s,短 TTL
  * 页面刚上屏就过期回刷,观感是"闪一下就没了"。 */

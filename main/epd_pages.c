@@ -10,6 +10,7 @@
 #include "epd.h"
 #include "epd_calendar.h"
 #include "fonts.h"
+#include "lunar.h"
 #include "u8g2_font.h"
 
 #include <stdio.h>
@@ -817,6 +818,246 @@ static void render_calendar_overlay(uint8_t *bw, uint8_t *red,
  *   "todo_days":[21,23],"holidays":[{"d":1,"name":"元旦"}],"workdays":[…]}}
  * 键名刻意不用顶层 "overlay" — display_mode stash_overlay_from() 会把
  * 顶层 overlay 收编进当日暂存,下月节假日就会画到本月常驻主页上。 */
+/* ---- 复合 dashboard (5.83 专属, 74 §7.2) ----
+ * 版式: 左栏 ~430px 紧凑月历(1x 日期) + 竖线 + 右栏 ~218px
+ * (天气块上 / 今日待办中 / 药格迷你条下)。
+ * 载荷: {"mode":"dash","dash":{calendar:{todo_days,holidays,workdays},
+ *   weather:{desc,temp_c,humidity,city}, todos:[{time,text,today}],
+ *   med:{days:[{date,slots:[..]}], today_idx}}} */
+
+static void utf8_trunc_to_width(u8g2_font_t *font, char *s, int max_w);
+
+static void render_dashboard(uint8_t *bw, uint8_t *red, const char *payload)
+{
+    memset(bw, 0xFF, EPD_BUF_SIZE);
+    memset(red, 0x00, EPD_BUF_SIZE);
+    g_bw = bw; g_red = red;
+
+    u8g2_font_t font;
+    memset(&font, 0, sizeof(font));
+    font.draw_hv_line = u8g2_draw_hv_line;
+    u8g2_SetBackgroundColor(&font, U_WHITE);
+    u8g2_SetFontMode(&font, 1);
+
+    cJSON *root = cJSON_Parse(payload);
+    cJSON *dash = root ? cJSON_GetObjectItem(root, "dash") : NULL;
+    if (!cJSON_IsObject(dash)) dash = root;
+
+    /* ---- 布局 ---- */
+    const int cal_w = 430;
+    const int right_x = cal_w + 6;
+    const int right_w = EPD_WIDTH - right_x - 4;
+
+    /* ---- 标题栏(全宽) ---- */
+    draw_title_bar(&font, "安伴");
+
+    /* ---- 左栏:紧凑月历 ---- */
+    time_t now;
+    struct tm tm_now;
+    time(&now);
+    localtime_r(&now, &tm_now);
+    int year = tm_now.tm_year + 1900, month = tm_now.tm_mon + 1;
+    int today_mday = tm_now.tm_mday;
+
+    /* 月标题 + 完整农历(月+日) */
+    u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
+    u8g2_SetForegroundColor(&font, U_BLACK);
+    char mtitle[32];
+    snprintf(mtitle, sizeof(mtitle), "%d年%d月", year, month);
+    draw_text(&font, 8, TITLE_H + 16, mtitle, 1);
+
+    struct Lunar_Date ld;
+    LUNAR_SolarToLunar(&ld, year, month, today_mday);
+    char lunar_full[20];
+    snprintf(lunar_full, sizeof(lunar_full), "%s%s",
+             Lunar_MonthString[ld.Month], Lunar_DateString[ld.Date]);
+    u8g2_SetForegroundColor(&font, U_RED);
+    draw_text(&font, 8 + text_w(&font, mtitle, 1) + 12, TITLE_H + 16,
+              lunar_full, 1);
+
+    /* 星期栏 */
+    int wh_y = TITLE_H + 22, wh_h = 20;
+    int cal_top = wh_y + wh_h + 2;
+    int cal_margin = 4;
+    int colw = (cal_w - cal_margin * 2) / 7;
+    static const char *wd_short[7] = {"日","一","二","三","四","五","六"};
+    u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
+    for (int c = 0; c < 7; c++) {
+        u8g2_SetForegroundColor(&font,
+            (c == 0 || c == 6) ? U_RED : U_BLACK);
+        int tw = text_w(&font, wd_short[c], 1);
+        int cx = cal_margin + c * colw + colw / 2;
+        draw_text(&font, cx - tw / 2, wh_y + 14, wd_short[c], 1);
+    }
+    fill_rect(0, wh_y + wh_h, cal_w, wh_y + wh_h, CLR_BLACK);
+
+    /* 日格:数字 2x(36px), 今日黑底白字, 待办红框(用户裁决 11-18) */
+    static const int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    int dim = mdays[month - 1];
+    if (month == 2 && (year % 400 == 0 || (year % 4 == 0 && year % 100)))
+        dim = 29;
+    int fw = day_of_week(year, month, 1);
+    int nrows = (fw + dim + 6) / 7;
+    int cal_bottom = EPD_HEIGHT - 4;
+    int rowh = (cal_bottom - cal_top) / nrows;
+    int ns = 2;           /* 数字 2x(32px), wqy16 统一透明模式(用户裁决 11-18) */
+    int sq = 44;          /* 今日高亮块(用户裁决:框再大一些) */
+
+    u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
+    u8g2_SetFontMode(&font, 1);
+    for (int d = 1; d <= dim; d++) {
+        int col = (fw + d - 1) % 7, row = (fw + d - 1) / 7;
+        int cx = cal_margin + col * colw + colw / 2;
+        int cy = cal_top + row * rowh + rowh / 2;
+        char nb[12];
+        snprintf(nb, sizeof(nb), "%d", d);
+        if (d == today_mday) {
+            /* 用户裁决(11-18): 今日=红底白字(非黑底), 框加大 */
+            fill_rect(cx - sq / 2, cy - sq / 2, cx + sq / 2, cy + sq / 2,
+                      CLR_RED);
+            u8g2_SetForegroundColor(&font, U_WHITE);
+        } else {
+            u8g2_SetForegroundColor(&font,
+                (col == 0 || col == 6) ? U_RED : U_BLACK);
+        }
+        int nw = text_w(&font, nb, ns);
+        draw_text(&font, cx - nw / 2, cy + 7 * ns, nb, ns);
+    }
+    u8g2_SetForegroundColor(&font, U_BLACK);
+
+    /* overlay 框线(todo_days 红框, 用户裁决:框再大一些) */
+    cJSON *cal = cJSON_GetObjectItem(dash, "calendar");
+    if (cJSON_IsObject(cal)) {
+        cJSON *td = cJSON_GetObjectItem(cal, "todo_days");
+        if (cJSON_IsArray(td)) {
+            cJSON *it;
+            cJSON_ArrayForEach(it, td) {
+                if (!cJSON_IsNumber(it)) continue;
+                int day = it->valueint;
+                if (day < 1 || day > dim) continue;
+                int col = (fw + day - 1) % 7, row = (fw + day - 1) / 7;
+                int cx = cal_margin + col * colw + colw / 2;
+                int cy = cal_top + row * rowh + rowh / 2;
+                frame_rect(cx - sq / 2 - 4, cy - sq / 2 - 4,
+                           cx + sq / 2 + 4, cy + sq / 2 + 4, CLR_RED, 3);
+            }
+        }
+    }
+
+    /* ---- 竖线分隔 ---- */
+    fill_rect(cal_w + 2, TITLE_H + 4, cal_w + 2, EPD_HEIGHT - 4, CLR_BLACK);
+
+    /* ---- 右栏:天气(无图标,纯文字) ---- */
+    int ry = TITLE_H + 12;
+    cJSON *wx = cJSON_GetObjectItem(dash, "weather");
+    u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
+    if (cJSON_IsObject(wx)) {
+        const char *desc = "";
+        cJSON *dsc = cJSON_GetObjectItem(wx, "desc");
+        cJSON *tc = cJSON_GetObjectItem(wx, "temp_c");
+        cJSON *hu = cJSON_GetObjectItem(wx, "humidity");
+        if (cJSON_IsString(dsc)) desc = dsc->valuestring;
+
+        /* 温度大字(红色) */
+        char tbuf[16];
+        snprintf(tbuf, sizeof(tbuf), "%d°",
+                 cJSON_IsNumber(tc) ? (int)tc->valuedouble : 0);
+        u8g2_SetForegroundColor(&font, U_RED);
+        draw_text(&font, right_x + 4, ry + 20, tbuf, 2);
+
+        /* 天气描述 */
+        u8g2_SetForegroundColor(&font, U_BLACK);
+        draw_text(&font, right_x + 70, ry + 14, desc, 1);
+
+        if (cJSON_IsNumber(hu)) {
+            char hbuf[20];
+            snprintf(hbuf, sizeof(hbuf), "湿度 %d%%", (int)hu->valuedouble);
+            draw_text(&font, right_x + 70, ry + 34, hbuf, 1);
+        }
+    } else {
+        u8g2_SetForegroundColor(&font, U_BLACK);
+        draw_text(&font, right_x + 4, ry + 8, "天气待开通", 1);
+    }
+    ry += 56;
+    fill_rect(right_x, ry, EPD_WIDTH - 4, ry, CLR_BLACK);
+    ry += 6;
+
+    /* ---- 右栏:待办(今日 HH:MM + 近期 M/D, 总计 ≤9 行) ---- */
+    /* 用户裁决(11-18): 标题行红底白字 2x(32px)+加粗(双重绘制偏移 1px) */
+    fill_rect(right_x, ry - 6, EPD_WIDTH - 4, ry + 36, CLR_RED);
+    u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
+    u8g2_SetFontMode(&font, 1);
+    u8g2_SetForegroundColor(&font, U_WHITE);
+    draw_text(&font, right_x + 6, ry + 24, "今日待办", 2);
+    draw_text(&font, right_x + 7, ry + 24, "今日待办", 2);  /* 伪粗体 */
+    u8g2_SetForegroundColor(&font, U_BLACK);
+    ry += 42;
+
+    cJSON *todos = cJSON_GetObjectItem(dash, "todos");
+    int line_count = 0;
+    int max_lines = 9;
+    if (cJSON_IsArray(todos)) {
+        cJSON *it;
+        /* 今日:time+text, 最多 6 行 */
+        cJSON_ArrayForEach(it, todos) {
+            if (line_count >= 6 || line_count >= max_lines) break;
+            cJSON *tdy = cJSON_GetObjectItem(it, "today");
+            if (!cJSON_IsTrue(tdy)) continue;
+            cJSON *tm = cJSON_GetObjectItem(it, "time");
+            cJSON *tx = cJSON_GetObjectItem(it, "text");
+            if (!cJSON_IsString(tx)) continue;
+            /* 用户裁决(11-18): 时间+正文统一 wqy16 1x(16px)——24px 不好看 */
+            const char *tms = cJSON_IsString(tm) ? tm->valuestring : "";
+            char line[48];
+            snprintf(line, sizeof(line), "%s %s", tms,
+                     tx->valuestring);
+            utf8_trunc_to_width(&font, line, right_w - 8);
+            draw_text(&font, right_x + 4, ry + 14, line, 1);
+            ry += 24;
+            line_count++;
+        }
+    }
+    if (line_count == 0) {
+        draw_text(&font, right_x + 4, ry + 14, "今天没有安排", 1);
+        ry += 22;
+    }
+    /* 分隔 */
+    ry += 4;
+
+    /* 近期:date+text, 补满到 9 行 */
+    cJSON *upc = cJSON_GetObjectItem(dash, "upcoming");
+    if (cJSON_IsArray(upc) && line_count < max_lines) {
+        fill_rect(right_x, ry - 6, EPD_WIDTH - 4, ry + 36, CLR_RED);
+        u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
+        u8g2_SetFontMode(&font, 1);
+        u8g2_SetForegroundColor(&font, U_WHITE);
+        draw_text(&font, right_x + 6, ry + 24, "近期待办", 2);
+        draw_text(&font, right_x + 7, ry + 24, "近期待办", 2);  /* 伪粗体 */
+        u8g2_SetForegroundColor(&font, U_BLACK);
+        ry += 42;
+        cJSON *it;
+        cJSON_ArrayForEach(it, upc) {
+            if (line_count >= max_lines) break;
+            cJSON *dt = cJSON_GetObjectItem(it, "date");
+            cJSON *tx = cJSON_GetObjectItem(it, "text");
+            if (!cJSON_IsString(tx)) continue;
+            /* 用户裁决(11-18): 日期+正文统一 wqy16 1x(16px) */
+            const char *dts = cJSON_IsString(dt) ? dt->valuestring : "";
+            char line[48];
+            snprintf(line, sizeof(line), "%s %s", dts,
+                     tx->valuestring);
+            utf8_trunc_to_width(&font, line, right_w - 8);
+            draw_text(&font, right_x + 4, ry + 14, line, 1);
+            ry += 24;
+            line_count++;
+        }
+    }
+
+    if (root) cJSON_Delete(root);
+}
+
+static void utf8_trunc_to_width(u8g2_font_t *font, char *s, int max_w);
+
 static void render_month_view(uint8_t *bw, uint8_t *red, const char *payload)
 {
     cJSON *root = cJSON_Parse(payload);
@@ -982,6 +1223,9 @@ void epd_pages_render(int mode, const char *payload_json,
         break;
     case DMODE_MONTH_VIEW:
         render_month_view(bw, red, payload);
+        break;
+    case DMODE_DASH:
+        render_dashboard(bw, red, payload);
         break;
     default:
         epd_calendar_render(bw, red);

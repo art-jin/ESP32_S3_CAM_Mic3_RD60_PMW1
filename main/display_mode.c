@@ -27,7 +27,7 @@
 
 static const char *k_names[DMODE_COUNT] = {
     "calendar", "calendar_overlay", "weather", "todo",
-    "status", "medgrid", "msg", "month_view",
+    "status", "medgrid", "msg", "month_view", "dash",
 };
 
 static SemaphoreHandle_t s_lock;
