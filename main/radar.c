@@ -40,7 +40,7 @@
 #define RAD_RX_BUF      4096
 #define RAD_ACC_MAX     256
 
-#define RAD_POLL_MS     200      /* 5 Hz */
+#define RAD_POLL_MS     50       /* 20 Hz — 模块内部 41Hz 充裕，软件测速窗口增密 */
 #define RAD_OFFLINE_MISS 3       /* consecutive missed polls -> offline */
 #define RAD_INIT_RETRIES 3
 
@@ -312,7 +312,7 @@ static radar_tgt_state_t decode_state(uint8_t det)
  * motion — sustained 8 s -> FALL_SUSPECT. Clears when the spread
  * collapses (stood up), sustained motion, or target loss.
  * Weak-feature detector: dialogue verification lives in orchestration. */
-#define FALL_WIN_N      20     /* 4 s ring at 5 Hz */
+#define FALL_WIN_N      80     /* 4 s ring at 20 Hz (was 20 at 5 Hz) */
 #define FALL_SPREAD_MM  500
 #define FALL_CROSS_MIN  4
 #define FALL_MED_DRIFT  300
