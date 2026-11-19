@@ -292,7 +292,8 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"conf\":%.2f,"
         "\"radar\":{\"online\":%s,\"fall_detect\":%s,\"fall_state\":\"%s\",\"spread_mm\":%d,"
         "\"target\":{\"valid\":%s,\"state\":\"%s\","
-        "\"range_mm\":%u,\"azimuth\":%.0f,\"rb_conf\":%u,\"ang_conf\":%u}},"
+        "\"range_mm\":%u,\"azimuth\":%.0f,\"rb_conf\":%u,\"ang_conf\":%u,"
+        "\"frame_idx\":%lu}},"
         "\"fusion\":{\"evaluated\":%s,\"associated\":%s,\"doa_az\":%.0f,"
         "\"radar_az\":%.0f,\"diff\":%.0f,\"range_mm\":%u},"
         "\"mqtt\":{\"connected\":%s,\"seq\":%lu,\"dropped\":%lu,\"in_zone\":%s},"
@@ -323,6 +324,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         rt_valid ? rt.azimuth_deg : 0.0f,
         rt_valid ? rt.rb_conf : 0,
         rt_valid ? rt.angle_conf : 0,
+        (unsigned long)(rt_valid ? rt.frame_idx : 0),
         fr.evaluated ? "true" : "false",
         fr.associated ? "true" : "false",
         fr.doa_az_deg, fr.radar_az_deg, fr.angle_diff_deg,
