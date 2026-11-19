@@ -319,9 +319,15 @@ static radar_tgt_state_t decode_state(uint8_t det)
 #define FALL_CONFIRM_MS 2500
 #define FALL_CLEAR_MS   5000
 #define FALL_CLEAR_V    2
+/* R25-P0: 自适应散布阈值 — 远距坐姿散布大，固定 500mm 在 3m+ 误触发 */
+#define FALL_ADAPT_FROM_MM  2500   /* 超过此距离启用自适应 */
+#define FALL_ADAPT_COEF     18     /* threshold = range_mm × 18/100 */
+/* R25-P0: 角度方差 — 躺地目标在身体部位跳变，方位角 std 放大（投票条件非 AND） */
+#define FALL_ANG_STD_MIN    50     /* 0.5°（原始协议单位 0.01°），初始猜测待影子校准 */
 
 static volatile int s_fall_state = RADAR_FALL_IDLE;
 static uint16_t s_fr[FALL_WIN_N];
+static int16_t  s_fa[FALL_WIN_N];   /* R25: 角度 ring（协议原始值 s16） */
 static uint8_t  s_fst[FALL_WIN_N];
 static int64_t  s_ft[FALL_WIN_N];
 static int s_fall_n, s_fall_idx;
@@ -396,6 +402,7 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
 
     if (s_fall_state == RADAR_FALL_SUSPECT) {
         s_fr[s_fall_idx] = rmm;
+        s_fa[s_fall_idx] = ang;
         s_fst[s_fall_idx] = (uint8_t)st;
         s_ft[s_fall_idx] = now;
         s_fall_idx = (s_fall_idx + 1) % FALL_WIN_N;
@@ -430,6 +437,7 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
 
     /* push into the ring */
     s_fr[s_fall_idx] = rmm;
+    s_fa[s_fall_idx] = ang;
     s_fst[s_fall_idx] = (uint8_t)st;
     s_ft[s_fall_idx] = now;
     s_fall_idx = (s_fall_idx + 1) % FALL_WIN_N;
@@ -471,8 +479,35 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     }
     float med = tmp[FALL_WIN_N / 2];
 
-    bool qualify = spread >= FALL_SPREAD_MM && runs >= FALL_CROSS_MIN &&
-                   any_motion;
+    /* R25-P0: 距离自适应散布阈值 — 3.3m 坐姿散布 30-50cm 卡 500mm 线；
+     * 自适应后 3.3m 阈值=594mm，坐姿不再触发；躺地 80-150cm 仍远超 */
+    int spread_threshold = FALL_SPREAD_MM;
+    if (med > FALL_ADAPT_FROM_MM) {
+        spread_threshold = (int)(med * FALL_ADAPT_COEF) / 100;
+        if (spread_threshold < FALL_SPREAD_MM) spread_threshold = FALL_SPREAD_MM;
+    }
+
+    /* R25-P0: 角度方差 — 躺地目标方位角跳变（协议 s16 原始值，≈0.01°/LSB），
+     * 站/坐 std 低；作为 crossings 的 OR 替代（增加不同跌倒形态覆盖，
+     * 不加 AND 门槛——89a 专家警告 0.8⁵=33% 召回不可接受） */
+    float ang_sum = 0;
+    for (int i = 0; i < FALL_WIN_N; i++) ang_sum += (float)s_fa[i];
+    float ang_mean = ang_sum / FALL_WIN_N;
+    float ang_var = 0;
+    for (int i = 0; i < FALL_WIN_N; i++) {
+        float d = (float)s_fa[i] - ang_mean;
+        ang_var += d * d;
+    }
+    int16_t ang_std = (int16_t)__builtin_sqrtf(ang_var / FALL_WIN_N);
+
+    bool qualify = spread >= spread_threshold && any_motion &&
+                   (runs >= FALL_CROSS_MIN || ang_std >= FALL_ANG_STD_MIN);
+    if (qualify && s_fall_qual_us < 0) {
+        /* R25 影子日志：记录特征值供离线校准阈值 */
+        ESP_LOGI(TAG, "fall feat: med=%.0fmm spread=%d(th=%d) runs=%d "
+                 "ang_std=%d conf=%u — qualifying",
+                 (double)med, spread, spread_threshold, runs, ang_std, rbc);
+    }
     if (qualify) {
         s_fall_lastqual_us = now;
         if (s_fall_qual_us < 0) {
