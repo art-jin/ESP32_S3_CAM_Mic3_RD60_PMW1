@@ -413,6 +413,22 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
             ESP_LOGI(TAG, "FALL CLEAR (target lost)");
         }
         if (!valid) s_fall_last_us = now;   /* keep gap clock running */
+        /* R25-P1 丢失→重建签名需要无目标时段数据：absent 也 10s 一报 */
+        static int64_t s_last_absent_us = 0;
+        static uint8_t s_absent_cnt = 0;
+        if (now - s_last_absent_us >= 1000000LL) {
+            s_last_absent_us = now;
+            if (++s_absent_cnt >= 10) {
+                s_absent_cnt = 0;
+                char sj[96], st[64];
+                snprintf(st, sizeof(st), "%s/neck/radar_shadow",
+                         mqtt_publisher_prefix());
+                snprintf(sj, sizeof(sj),
+                         "{\"ev\":\"absent\",\"lowconf\":%s}",
+                         valid ? "true" : "false");
+                mqtt_publisher_publish_raw(st, sj, 0, 0);
+            }
+        }
         return;
     }
 
