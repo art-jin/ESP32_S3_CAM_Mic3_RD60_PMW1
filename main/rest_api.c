@@ -1217,7 +1217,7 @@ static esp_err_t handler_identity_post(httpd_req_t *req)
     ESP_LOGI(TAG, "identity injected+verified, rebooting to apply");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true,\"reboot\":\"now\"}");
-    vTaskDelay(pdMS_TO_TICKS(500));   /* 等 response 刷出 socket */
+    vTaskDelay(pdMS_TO_TICKS(1000));  /* 等 response 刷出 socket(500ms 实测偶发截断) */
     esp_restart();
     return ESP_OK;
 }
