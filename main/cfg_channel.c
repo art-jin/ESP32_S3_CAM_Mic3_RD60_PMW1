@@ -86,6 +86,11 @@ static void cfg_handler(const char *payload, int len)
         alen += snprintf(applied + alen, sizeof(applied) - alen,
                          "%s\"fall_detect\"", alen ? "," : "");
     }
+    if (jget_int(payload, "fall_shadow", &tmp)) {
+        mode_manager_set_fall_shadow(tmp != 0);
+        alen += snprintf(applied + alen, sizeof(applied) - alen,
+                         "%s\"fall_shadow\"", alen ? "," : "");
+    }
     if (jget_int(payload, "assoc_gate", &tmp)) {
         mode_manager_set_assoc_gate(tmp != 0);
         alen += snprintf(applied + alen, sizeof(applied) - alen,

@@ -77,6 +77,11 @@ bool mode_manager_get_assoc_gate(void);
 void mode_manager_set_fall_detect(bool on);
 bool mode_manager_get_fall_detect(void);
 
+/* R25-P0 影子模式：跌倒判定照跑、事件不外发（3-7 天系数采集期），
+ * 默认 false=生产行为不变；cfg_set {"fall_shadow":1} 远程开启 */
+void mode_manager_set_fall_shadow(bool on);
+bool mode_manager_get_fall_shadow(void);
+
 /* Called from mic_task at 20Hz. Checks command-mode timeout. */
 void mode_manager_tick(void);
 

@@ -20,6 +20,7 @@ static oor_policy_t    s_oor_policy = OOR_HOLD;
 static uint16_t        s_still_min = 0;   /* 0 = still-alarm disabled */
 static bool            s_assoc_gate = false;
 static bool            s_fall_detect = true;
+static bool            s_fall_shadow = false;   /* R25-P0 影子模式：默认关=生产行为 */
 
 static const char *submode_name(track_submode_t s)
 {
@@ -70,6 +71,8 @@ static void cfg_load(void)
     if (nvs_get_u8(h, "assocgate", &g) == ESP_OK && g <= 1)
         s_assoc_gate = g != 0;
     uint8_t f;
+    if (nvs_get_u8(h, "fshadow", &f) == ESP_OK && f <= 1)
+        s_fall_shadow = f != 0;
     if (nvs_get_u8(h, "falldet", &f) == ESP_OK && f <= 1)
         s_fall_detect = f != 0;
     nvs_close(h);
@@ -208,4 +211,18 @@ void mode_manager_set_fall_detect(bool on)
 bool mode_manager_get_fall_detect(void)
 {
     return s_fall_detect;
+}
+
+void mode_manager_set_fall_shadow(bool on)
+{
+    if (on == s_fall_shadow) return;
+    ESP_LOGI(TAG, "fall shadow mode: %s (判定照跑, 告警只记不发)",
+             on ? "ON" : "OFF");
+    s_fall_shadow = on;
+    cfg_save("fshadow", on ? 1 : 0);
+}
+
+bool mode_manager_get_fall_shadow(void)
+{
+    return s_fall_shadow;
 }

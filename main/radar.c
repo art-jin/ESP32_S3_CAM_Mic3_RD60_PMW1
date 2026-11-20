@@ -363,12 +363,25 @@ static void fall_fire(int16_t range_cm, int16_t ang, uint8_t rbc,
 {
     s_fall_state = RADAR_FALL_SUSPECT;
     s_fall_clear_v = 0;
+    int16_t az = (int16_t)(RADAR_AZ_OFFSET_DEG + RADAR_AZ_SCALE * (float)ang);
+    if (mode_manager_get_fall_shadow()) {
+        /* R25-P0 影子模式（3-7 天系数采集期）：判定照跑，事件不进告警链，
+         * 证据发 shadow topic 供离线定分位数 */
+        char sj[192], st[64];
+        snprintf(st, sizeof(st), "%s/neck/radar_shadow", mqtt_publisher_prefix());
+        snprintf(sj, sizeof(sj),
+                 "{\"ev\":\"fall_suspect\",\"range_cm\":%d,\"az\":%d,"
+                 "\"conf\":%u,\"spread\":%d,\"runs\":%d}",
+                 range_cm, az, rbc, spread_mm, runs);
+        mqtt_publisher_publish_raw(st, sj, 0, 0);
+        ESP_LOGW(TAG, "FALL SUSPECT (shadow, suppressed): %ucm",
+                 (unsigned)range_cm);
+        return;
+    }
     /* docs/52 P0-1: single push carries the radar conf (rbc) and the
      * qualifying spread/runs — MQTT publish rides the evlog mirror path
      * inside events.c (same-critical-section requirement). */
-    events_push_diag(AEVT_FALL_SUSPECT, range_cm,
-                     (int16_t)(RADAR_AZ_OFFSET_DEG + RADAR_AZ_SCALE * (float)ang),
-                     rbc, spread_mm, runs);
+    events_push_diag(AEVT_FALL_SUSPECT, range_cm, az, rbc, spread_mm, runs);
     ESP_LOGW(TAG, "FALL SUSPECT: bimodal oscillation confirmed (%ucm)",
              (unsigned)range_cm);
 }
@@ -551,12 +564,30 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     /* P1-3: 1Hz 负样本遥测 — 校准阈值的"米缸"（90a）：
      * 正常场景（坐/走/站）的特征分布，与正样本对照才能定分位数 */
     static int64_t s_last_telemetry_us = 0;
+    static uint8_t s_tel_cnt = 0;
     if (now - s_last_telemetry_us >= 1000000LL) {
         s_last_telemetry_us = now;
         ESP_LOGI(TAG, "fall feat(-): n=%d med=%.0fmm spread=%d(th=%d) "
                  "runs=%d ang_std=%d(ang_n=%d) conf=%u%s",
                  s_fall_n, (double)med, spread, spread_threshold, runs,
                  ang_std, ang_n, rbc, qualify ? " [Q]" : "");
+        /* R25-P0: 每 10s 聚合一份上 shadow topic（宿主收 3-7 天定分位数；
+         * 1Hz 全量只在串口，MQTT 载 1/10 防刷 broker） */
+        if (++s_tel_cnt >= 10) {
+            s_tel_cnt = 0;
+            char sj[224], st[64];
+            snprintf(st, sizeof(st), "%s/neck/radar_shadow",
+                     mqtt_publisher_prefix());
+            snprintf(sj, sizeof(sj),
+                     "{\"ev\":\"feat\",\"n\":%d,\"med\":%.0f,\"spread\":%d,"
+                     "\"th\":%d,\"runs\":%d,\"ang_std\":%d,\"ang_n\":%d,"
+                     "\"conf\":%u,\"q\":%s,\"sh\":%s}",
+                     s_fall_n, (double)med, spread, spread_threshold, runs,
+                     ang_std, ang_n, rbc,
+                     qualify ? "true" : "false",
+                     mode_manager_get_fall_shadow() ? "true" : "false");
+            mqtt_publisher_publish_raw(st, sj, 0, 0);
+        }
     }
 }
 
