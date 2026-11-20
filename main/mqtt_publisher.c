@@ -11,14 +11,15 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "mqtt_creds.h"
+#include "identity.h"
 #include "evlog.h"
 
 static const char *TAG = "mqtt";
 
 /* ---- Credentials — single access point (§6.5 fleet-migration note) ----
  * Everything above this function is forbidden from touching mqtt_creds.h;
- * when fleet provisioning moves to an NVS "fleet" namespace, only
- * get_creds() changes. */
+ * F-1b: 来源已迁 NVS identity（identity.h getter，NVS 优先+mqtt_creds.h
+ * 编译期回落）——本函数仍是唯一消费点。 */
 typedef struct {
     const char *uri;
     const char *username;
@@ -29,13 +30,16 @@ typedef struct {
 
 static const neck_creds_t *get_creds(void)
 {
-    static const neck_creds_t c = {
-        .uri              = MQTT_BROKER_URI,
-        .username         = MQTT_USERNAME,
-        .password         = MQTT_PASSWORD,
-        .robot_prefix     = MQTT_ROBOT_PREFIX,
-        .expect_device_id = MQTT_EXPECT_DEVICE_ID,
-    };
+    static neck_creds_t c;
+    static bool inited = false;
+    if (!inited) {
+        c.uri              = identity_mqtt_broker();
+        c.username         = identity_mqtt_user();
+        c.password         = identity_mqtt_pass();
+        c.robot_prefix     = identity_mqtt_prefix();
+        c.expect_device_id = identity_expect_device_id();
+        inited = true;
+    }
     return &c;
 }
 

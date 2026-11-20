@@ -16,6 +16,7 @@
 #include "wifi.h"
 #include "mode_manager.h"
 #include "status.h"
+#include "identity.h"
 #include "evlog.h"
 #include "events.h"
 #include "radar.h"
@@ -238,6 +239,8 @@ void app_main(void)
     }
 
     device_id_init();  /* load or generate persistent device ID */
+
+    identity_init();  /* F-1b: NVS 身份（NVS 优先+编译期回落），boot 期显式加载 */
 
     evlog_init();  /* load prior events from NVS, increment boot counter */
     evlog_record(EV_BOOT, 0, (int16_t)esp_reset_reason());

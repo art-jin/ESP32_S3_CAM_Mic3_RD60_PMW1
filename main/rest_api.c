@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mode_manager.h"
+#include "identity.h"
 #include "status.h"
 #include "servo.h"
 #include "doa.h"
@@ -1165,6 +1166,62 @@ static esp_err_t handler_shake(httpd_req_t *req)
     return send_json_ok(req, "{\"ok\":true}");
 }
 
+/* ---- /api/identity_config — F-1b 身份注入端点（写后回读校验+重启生效）
+ * 认证与其余端点同款（?device_id=<本板 NVS id>）；GET 返回掩码摘要。 */
+static esp_err_t handler_identity_get(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, identity_summary_json());
+}
+
+static esp_err_t handler_identity_post(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+
+    static char body[1024];   /* 9 字段(最长 broker 128B)远小于 1K；静态避免重栈 */
+    if (!read_body(req, body, sizeof(body))) return ESP_OK;
+
+    char v_broker[128], v_user[64], v_pass[64], v_prefix[64], v_expect[24];
+    char v_w0s[40], v_w0p[72], v_w1s[40], v_w1p[72];
+    const char *broker  = json_get_str(body, "broker",           v_broker, sizeof(v_broker)) && v_broker[0] ? v_broker : NULL;
+    const char *user    = json_get_str(body, "user",             v_user,   sizeof(v_user))   && v_user[0]   ? v_user   : NULL;
+    const char *pass    = json_get_str(body, "pass",             v_pass,   sizeof(v_pass))   && v_pass[0]   ? v_pass   : NULL;
+    const char *prefix  = json_get_str(body, "prefix",           v_prefix, sizeof(v_prefix)) && v_prefix[0] ? v_prefix : NULL;
+    const char *expect  = json_get_str(body, "expect_device_id", v_expect, sizeof(v_expect)) && v_expect[0] ? v_expect : NULL;
+    const char *w0s     = json_get_str(body, "wifi0_ssid",       v_w0s,    sizeof(v_w0s))    && v_w0s[0]    ? v_w0s    : NULL;
+    const char *w0p     = json_get_str(body, "wifi0_pass",       v_w0p,    sizeof(v_w0p))    && v_w0p[0]    ? v_w0p    : NULL;
+    const char *w1s     = json_get_str(body, "wifi1_ssid",       v_w1s,    sizeof(v_w1s))    && v_w1s[0]    ? v_w1s    : NULL;
+    const char *w1p     = json_get_str(body, "wifi1_pass",       v_w1p,    sizeof(v_w1p))    && v_w1p[0]    ? v_w1p    : NULL;
+
+    /* 半套 MQTT 身份会把脖子打到"NVS user + 旧 prefix"混合态——要动
+     * MQTT 身份，user/pass/prefix 必须整套（broker/expect/wifi 可单改） */
+    int mq_qty = (user ? 1 : 0) + (pass ? 1 : 0) + (prefix ? 1 : 0);
+    if (mq_qty != 0 && mq_qty != 3) {
+        send_error(req, 400, "partial_mqtt", "user/pass/prefix must be set together");
+        return ESP_OK;
+    }
+
+    esp_err_t err = identity_write_all(broker, user, pass, prefix, expect,
+                                       w0s, w0p, w1s, w1p);
+    if (err != ESP_OK) {
+        send_error(req, 500, "nvs_write_failed", esp_err_to_name(err));
+        return ESP_OK;
+    }
+    /* 写后回读校验（89a H-2）：不过不重启，保持可注入状态 */
+    if (!identity_verify(broker, user, pass, prefix, expect, w0s, w0p, w1s, w1p)) {
+        send_error(req, 500, "verify_failed", "NVS readback mismatch");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "identity injected+verified, rebooting to apply");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"reboot\":\"now\"}");
+    vTaskDelay(pdMS_TO_TICKS(500));   /* 等 response 刷出 socket */
+    esp_restart();
+    return ESP_OK;
+}
+
 /* ---- Server start ---- */
 esp_err_t rest_api_start(void)
 {
@@ -1251,6 +1308,12 @@ esp_err_t rest_api_start(void)
     static const httpd_uri_t uri_options = {
         .uri = "/*", .method = HTTP_OPTIONS, .handler = handler_options
     };
+    static const httpd_uri_t uri_identity_get = {
+        .uri = "/api/identity_config", .method = HTTP_GET, .handler = handler_identity_get
+    };
+    static const httpd_uri_t uri_identity_post = {
+        .uri = "/api/identity_config", .method = HTTP_POST, .handler = handler_identity_post
+    };
 
     httpd_register_uri_handler(s_server, &uri_root);
     httpd_register_uri_handler(s_server, &uri_ping);
@@ -1273,8 +1336,10 @@ esp_err_t rest_api_start(void)
     httpd_register_uri_handler(s_server, &uri_epd_frame);
     httpd_register_uri_handler(s_server, &uri_point);
     httpd_register_uri_handler(s_server, &uri_shake);
+    httpd_register_uri_handler(s_server, &uri_identity_get);
+    httpd_register_uri_handler(s_server, &uri_identity_post);
     httpd_register_uri_handler(s_server, &uri_options);
 
-    ESP_LOGI(TAG, "REST API started: /api/ping /api/status /api/logs /api/events /api/mode /api/radar /api/radar/reset /api/epd/test /api/point /api/shake");
+    ESP_LOGI(TAG, "REST API started: /api/ping /api/status /api/logs /api/events /api/mode /api/radar /api/radar/reset /api/epd/test /api/point /api/shake /api/identity_config");
     return ESP_OK;
 }

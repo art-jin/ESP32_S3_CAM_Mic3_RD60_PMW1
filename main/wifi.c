@@ -16,6 +16,7 @@
 #include "freertos/timers.h"
 #include "mdns.h"
 #include "wifi_creds.h"
+#include "identity.h"
 #include "evlog.h"
 #include "board_config.h"
 
@@ -49,10 +50,20 @@ typedef struct {
 
 #define WIFI_NET_COUNT 2
 
-static const wifi_net_slot_t s_wifi_nets[WIFI_NET_COUNT] = {
-    { WIFI0_SSID, WIFI0_PASSWORD, WIFI0_USE_STATIC },
-    { WIFI1_SSID, WIFI1_PASSWORD, WIFI1_USE_STATIC },
-};
+static wifi_net_slot_t s_wifi_nets[WIFI_NET_COUNT];
+static bool s_nets_filled = false;
+
+/* F-1b: 槽位来源迁 NVS identity（NVS 优先，wifi_creds.h 编译期回落）；
+ * 静态 IP 标志仍编译期（默认 0，bench 特例才开）。 */
+static void ensure_wifi_nets(void)
+{
+    if (s_nets_filled) return;
+    s_nets_filled = true;
+    s_wifi_nets[0] = (wifi_net_slot_t){
+        identity_wifi_ssid(0), identity_wifi_pass(0), WIFI0_USE_STATIC };
+    s_wifi_nets[1] = (wifi_net_slot_t){
+        identity_wifi_ssid(1), identity_wifi_pass(1), WIFI1_USE_STATIC };
+}
 
 /* Forward declarations for rest_api (avoid circular include). */
 extern esp_err_t rest_api_start(void);
@@ -95,6 +106,7 @@ static void apply_static_ip(void) { }
  * the netif. */
 static void apply_ip_mode(int slot)
 {
+    ensure_wifi_nets();
     bool want_static = false;
 #if defined(USE_STATIC_IP) && USE_STATIC_IP
     want_static = s_wifi_nets[slot].use_static_ip;
@@ -115,6 +127,7 @@ static void apply_ip_mode(int slot)
 
 static void set_sta_config(int slot)
 {
+    ensure_wifi_nets();
     wifi_config_t cfg = {
         .sta = {
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
