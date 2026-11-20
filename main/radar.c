@@ -405,7 +405,7 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
 
     if (s_fall_state == RADAR_FALL_SUSPECT) {
         s_fr[s_fall_idx] = rmm;
-        s_fa[s_fall_idx] = ang;
+        s_fa[s_fall_idx] = (angle_conf >= 8) ? ang : 0x7FFF;
         s_fst[s_fall_idx] = (uint8_t)st;
         s_ft[s_fall_idx] = now;
         s_fall_idx = (s_fall_idx + 1) % FALL_WIN_N;
@@ -530,7 +530,8 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
                      spread, runs);
         } else if (fabsf(med - s_fall_med0) <= FALL_MED_DRIFT &&
                    now - s_fall_qual_us >= FALL_CONFIRM_MS * 1000LL) {
-            fall_fire((int16_t)(med / 10), ang, rbc,
+            fall_fire((int16_t)(med / 10),
+                      (int16_t)s_target.angle_filt_deg, rbc,
                       (int16_t)spread, (int16_t)runs);
             return;
         } else if (fabsf(med - s_fall_med0) > FALL_MED_DRIFT) {
@@ -552,10 +553,10 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     static int64_t s_last_telemetry_us = 0;
     if (now - s_last_telemetry_us >= 1000000LL) {
         s_last_telemetry_us = now;
-        ESP_LOGI(TAG, "fall feat(-): med=%.0fmm spread=%d(th=%d) runs=%d "
-                 "ang_std=%d(ang_n=%d) conf=%u%s",
-                 (double)med, spread, spread_threshold, runs, ang_std,
-                 ang_n, rbc, qualify ? " [Q]" : "");
+        ESP_LOGI(TAG, "fall feat(-): n=%d med=%.0fmm spread=%d(th=%d) "
+                 "runs=%d ang_std=%d(ang_n=%d) conf=%u%s",
+                 s_fall_n, (double)med, spread, spread_threshold, runs,
+                 ang_std, ang_n, rbc, qualify ? " [Q]" : "");
     }
 }
 
