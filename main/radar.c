@@ -5,7 +5,7 @@
  * default; this module's firmware actually ships 115200 (measured,
  * tasks/radar-protocol-notes.md).
  *
- * Data path: poll 3.2.6 (cmd 0x30) at 5 Hz. Every reply carries the full
+ * Data path: poll 3.2.6 (cmd 0x30) at 20 Hz. Every reply carries the full
  * fmcw_det_info_t. No-target signature: det_result=0, range=0, conf=0
  * (is_detected stays 1 — it means "frame valid", not "target present").
  *
@@ -41,7 +41,7 @@
 #define RAD_ACC_MAX     256
 
 #define RAD_POLL_MS     50       /* 20 Hz — 模块内部 41Hz 充裕，软件测速窗口增密 */
-#define RAD_OFFLINE_MISS 3       /* consecutive missed polls -> offline */
+#define RAD_OFFLINE_MISS 10      /* 500ms at 20Hz (was 3=600ms at 5Hz, now too tight) */
 #define RAD_INIT_RETRIES 3
 
 static const char *TAG = "radar";
@@ -322,8 +322,10 @@ static radar_tgt_state_t decode_state(uint8_t det)
 /* R25-P0: 自适应散布阈值 — 远距坐姿散布大，固定 500mm 在 3m+ 误触发 */
 #define FALL_ADAPT_FROM_MM  2500   /* 超过此距离启用自适应 */
 #define FALL_ADAPT_COEF     18     /* threshold = range_mm × 18/100 */
-/* R25-P0: 角度方差 — 躺地目标在身体部位跳变，方位角 std 放大（投票条件非 AND） */
-#define FALL_ANG_STD_MIN    50     /* 0.5°（原始协议单位 0.01°），初始猜测待影子校准 */
+/* R25-P0: 角度方差 — 躺地目标在身体部位跳变，方位角 std 放大（投票条件非 AND）
+ * 协议 angle_val 单位=1°（s16），90a P0 修正（原误标 0.01° 导致 50=永远不触发）
+ * 坐姿 std 约 2-3°，躺地跳变估 5-15°，初始 6° 待影子数据校准 */
+#define FALL_ANG_STD_MIN    6      /* 度，初始猜测 */
 
 static volatile int s_fall_state = RADAR_FALL_IDLE;
 static uint16_t s_fr[FALL_WIN_N];
@@ -371,9 +373,10 @@ static void fall_fire(int16_t range_cm, int16_t ang, uint8_t rbc,
              (unsigned)range_cm);
 }
 
-/* Runs in the radar task on every published 0x30 sample (5 Hz). */
+/* Runs in the radar task on every published 0x30 sample (20 Hz). */
 static void fall_feed(bool valid, radar_tgt_state_t st,
-                      uint16_t rmm, int16_t ang, uint8_t rbc)
+                      uint16_t rmm, int16_t ang, uint8_t rbc,
+                      uint8_t angle_conf)
 {
     int64_t now = esp_timer_get_time();
 
@@ -435,9 +438,10 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
         fall_reset();                  /* long gap: restart the window */
     s_fall_last_us = now;
 
-    /* push into the ring */
+    /* push into the ring — P1-2: 低置信角度不进方差计算（协议 angle_conf<8
+     * 可能不准），用哨兵值标记跳过 */
     s_fr[s_fall_idx] = rmm;
-    s_fa[s_fall_idx] = ang;
+    s_fa[s_fall_idx] = (angle_conf >= 8) ? ang : 0x7FFF;
     s_fst[s_fall_idx] = (uint8_t)st;
     s_ft[s_fall_idx] = now;
     s_fall_idx = (s_fall_idx + 1) % FALL_WIN_N;
@@ -458,13 +462,13 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     int spread = mx - mn;
     s_fall_spread = spread;
 
-    /* midpoint crossings with 1-sample debounce: count runs of
-     * same-side samples, ignore single-sample spikes */
+    /* midpoint crossings — P1-1: 20Hz 下 1 帧=50ms，run_len>=4 恢复 5Hz 时代
+     * run_len>=1 的 200ms 去抖语义（同一物理场景帧数翻 4 倍不翻判别力） */
     int runs = 0, last_side = 0, run_len = 0;
     for (int i = 0; i < FALL_WIN_N; i++) {
         int side = s_fr[i] > mid ? 1 : (s_fr[i] < mid ? -1 : 0);
         if (side == 0) side = last_side;
-        if (side != last_side && last_side != 0 && run_len >= 1) runs++;
+        if (side != last_side && last_side != 0 && run_len >= 4) runs++;
         if (side != 0) { if (side != last_side) run_len = 1; else run_len++; }
         if (side != 0) last_side = side;
     }
@@ -487,26 +491,35 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
         if (spread_threshold < FALL_SPREAD_MM) spread_threshold = FALL_SPREAD_MM;
     }
 
-    /* R25-P0: 角度方差 — 躺地目标方位角跳变（协议 s16 原始值，≈0.01°/LSB），
-     * 站/坐 std 低；作为 crossings 的 OR 替代（增加不同跌倒形态覆盖，
-     * 不加 AND 门槛——89a 专家警告 0.8⁵=33% 召回不可接受） */
+    /* R25-P0: 角度方差（90a 修正版）— 协议 angle_val 单位=1°；跳过 P1-2
+     * 哨兵值（angle_conf<8 的不可信样本）；作为 crossings 的 OR 替代 */
     float ang_sum = 0;
-    for (int i = 0; i < FALL_WIN_N; i++) ang_sum += (float)s_fa[i];
-    float ang_mean = ang_sum / FALL_WIN_N;
-    float ang_var = 0;
+    int ang_n = 0;
     for (int i = 0; i < FALL_WIN_N; i++) {
+        if (s_fa[i] != 0x7FFF) { ang_sum += (float)s_fa[i]; ang_n++; }
+    }
+    if (ang_n < FALL_WIN_N / 2) {
+        ang_n = 0;   /* 有效角度样本不足半窗 → 方差不可信 → 禁用此分支 */
+    }
+    float ang_mean = ang_n ? ang_sum / ang_n : 0;
+    float ang_var = 0;
+    for (int i = 0; ang_n && i < FALL_WIN_N; i++) {
+        if (s_fa[i] == 0x7FFF) continue;
         float d = (float)s_fa[i] - ang_mean;
         ang_var += d * d;
     }
-    int16_t ang_std = (int16_t)__builtin_sqrtf(ang_var / FALL_WIN_N);
+    int16_t ang_std = ang_n ?
+        (int16_t)__builtin_sqrtf(ang_var / ang_n) : 0;
 
     bool qualify = spread >= spread_threshold && any_motion &&
-                   (runs >= FALL_CROSS_MIN || ang_std >= FALL_ANG_STD_MIN);
+                   (runs >= FALL_CROSS_MIN ||
+                    (ang_n && ang_std >= FALL_ANG_STD_MIN));
     if (qualify && s_fall_qual_us < 0) {
-        /* R25 影子日志：记录特征值供离线校准阈值 */
-        ESP_LOGI(TAG, "fall feat: med=%.0fmm spread=%d(th=%d) runs=%d "
-                 "ang_std=%d conf=%u — qualifying",
-                 (double)med, spread, spread_threshold, runs, ang_std, rbc);
+        /* R25 影子日志：正样本特征值 */
+        ESP_LOGI(TAG, "fall feat(+): med=%.0fmm spread=%d(th=%d) runs=%d "
+                 "ang_std=%d(ang_n=%d) conf=%u — qualifying",
+                 (double)med, spread, spread_threshold, runs, ang_std,
+                 ang_n, rbc);
     }
     if (qualify) {
         s_fall_lastqual_us = now;
@@ -532,6 +545,17 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
          * not abort an in-progress confirmation. */
         s_fall_qual_us = -1;
         s_fall_lastqual_us = -1;
+    }
+
+    /* P1-3: 1Hz 负样本遥测 — 校准阈值的"米缸"（90a）：
+     * 正常场景（坐/走/站）的特征分布，与正样本对照才能定分位数 */
+    static int64_t s_last_telemetry_us = 0;
+    if (now - s_last_telemetry_us >= 1000000LL) {
+        s_last_telemetry_us = now;
+        ESP_LOGI(TAG, "fall feat(-): med=%.0fmm spread=%d(th=%d) runs=%d "
+                 "ang_std=%d(ang_n=%d) conf=%u%s",
+                 (double)med, spread, spread_threshold, runs, ang_std,
+                 ang_n, rbc, qualify ? " [Q]" : "");
     }
 }
 
@@ -594,7 +618,8 @@ static void publish(uint8_t det_result, uint16_t range_mm, int16_t angle_deg,
     s_target.last_seen_ms = esp_timer_get_time() / 1000;
     xSemaphoreGive(s_lock);
 
-    fall_feed(det_result != 0, s_target.state, range_mm, angle_deg, rb_conf);
+    fall_feed(det_result != 0, s_target.state, range_mm, angle_deg, rb_conf,
+              angle_conf);
 
     if (was_valid != s_target.valid) {
         if (s_target.valid) {
