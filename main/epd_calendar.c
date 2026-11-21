@@ -31,8 +31,8 @@ static int g_ox = 0, g_oy = 0;
 
 static void set_pixel(uint8_t *bw, uint8_t *red, int x, int y, int color)
 {
-    if (x < 0 || x >= EPD_WIDTH || y < 0 || y >= EPD_HEIGHT) return;
-    int idx = y * (EPD_WIDTH / 8) + x / 8;
+    if (x < 0 || x >= epd_width() || y < 0 || y >= epd_height()) return;
+    int idx = y * (epd_width() / 8) + x / 8;
     int bit = 7 - (x % 8);
     switch (color) {
         case CLR_BLACK: bw[idx] &= ~(1 << bit); red[idx] &= ~(1 << bit); break;
@@ -191,7 +191,7 @@ static void draw_date_header(u8g2_font_t *font, int year, int month,
 
 static void draw_week_header(u8g2_font_t *font, int x0, int y, int cell_w)
 {
-    bool large = (EPD_HEIGHT >= 400);
+    bool large = (epd_height() >= 400);
     int h = large ? 30 : 22;
     int x1 = x0 + 7 * cell_w - 1;
 
@@ -216,12 +216,12 @@ static void draw_week_header(u8g2_font_t *font, int x0, int y, int cell_w)
 static void draw_month_days(u8g2_font_t *font, int x0, int y,
                              int today, int fw, int dim, int nrows)
 {
-    bool large = (EPD_HEIGHT >= 400);
+    bool large = (epd_height() >= 400);
     /* 5.83 吋(648×480):数字 2x(18px→36px,物理幅面大,老爹远看友好);
      * sq(今天黑底块)随之 34→52,须与 epd_pages.c apply_month_decor 同步。 */
     int ns = large ? 2 : 1;
-    int bw = (EPD_WIDTH - x0 * 2) / 7;
-    int bh = (EPD_HEIGHT - y - 4) / nrows;
+    int bw = (epd_width() - x0 * 2) / 7;
+    int bh = (epd_height() - y - 4) / nrows;
     int sq = large ? 52 : 30;
 
     u8g2_SetBackgroundColor(font, U_WHITE);
@@ -290,8 +290,8 @@ void epd_calendar_render_month(uint8_t *bw, uint8_t *red,
     int dim   = days_in_month(year, month);
     int nrows = (fw + dim + 6) / 7;
 
-    memset(bw, 0xFF, EPD_BUF_SIZE);
-    memset(red, 0x00, EPD_BUF_SIZE);
+    memset(bw, 0xFF, epd_buf_size());
+    memset(red, 0x00, epd_buf_size());
     g_bw = bw;
     g_red = red;
 
@@ -304,9 +304,9 @@ void epd_calendar_render_month(uint8_t *bw, uint8_t *red,
     int lunar_day = (today_day > 0) ? today_day : 1;
     LUNAR_SolarToLunar(&lunar_ref, year, month, lunar_day);
 
-    bool large = (EPD_HEIGHT >= 400);
+    bool large = (epd_height() >= 400);
     int margin = 6;
-    int cell_w = (EPD_WIDTH - margin * 2) / 7;
+    int cell_w = (epd_width() - margin * 2) / 7;
 
     int header_y = large ? 38 : 28;
     draw_date_header(&font, year, month, header_y, &lunar_ref);

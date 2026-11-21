@@ -16,17 +16,11 @@
                               * 62%，渲染/任务在 648x480——左侧月历右侧残影）。 */
 #include <stdbool.h>
 #include <stdint.h>
+#include "epd_geom.h"   /* R26-A3: EPD_WIDTH/HEIGHT/BUF_SIZE 宏退役——
+                         * 运行时访问器 epd_width()/epd_height()/epd_buf_size() */
 
-/* Panel variant (board_config.h): 5.83" FPC-8601B 648x480 (UC8179/GD7965)
- * or 4.2" Hink-E042A48-A1 400x300 (SSD1683). */
-#if defined(EPD_PANEL_5IN83)
-#define EPD_WIDTH  648
-#define EPD_HEIGHT 480
-#else
-#define EPD_WIDTH  400
-#define EPD_HEIGHT 300
-#endif
-#define EPD_BUF_SIZE (EPD_WIDTH / 8 * EPD_HEIGHT)
+/* Panel variant: 运行时选择（epd_geom.c 面板表，identity NVS epd_panel 注入，
+ * 编译默认 4.2）。5.83" FPC-8601B UC8179-V2 / 4.2" P420016-MF1。 */
 
 /* Returns false when init failed (BUSY timeout — usually panel absent). */
 bool epd_init(void);

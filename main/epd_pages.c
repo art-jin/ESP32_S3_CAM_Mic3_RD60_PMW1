@@ -46,8 +46,8 @@ static int g_ox = 0, g_oy = 0;
 
 static void set_pixel(int x, int y, int color)
 {
-    if (x < 0 || x >= EPD_WIDTH || y < 0 || y >= EPD_HEIGHT) return;
-    int idx = y * (EPD_WIDTH / 8) + x / 8;
+    if (x < 0 || x >= epd_width() || y < 0 || y >= epd_height()) return;
+    int idx = y * (epd_width() / 8) + x / 8;
     int bit = 7 - (x % 8);
     switch (color) {
     case CLR_BLACK: g_bw[idx] &= ~(1 << bit); g_red[idx] &= ~(1 << bit); break;
@@ -179,7 +179,7 @@ static void draw_weather_icon(const char *cond, int cx, int cy)
 
 static void draw_title_bar(u8g2_font_t *font, const char *title)
 {
-    fill_rect(0, 0, EPD_WIDTH - 1, TITLE_H - 1, CLR_BLACK);
+    fill_rect(0, 0, epd_width() - 1, TITLE_H - 1, CLR_BLACK);
     u8g2_SetFont(font, u8g2_font_wqy16_t_gb2312a);
     u8g2_SetFontMode(font, 1);
     u8g2_SetForegroundColor(font, U_WHITE);
@@ -200,8 +200,8 @@ static void draw_lines_page(uint8_t *bw, uint8_t *red,
                             const char *title, const char *const *lines,
                             int n_lines, int hero_index)
 {
-    memset(bw, 0xFF, EPD_BUF_SIZE);
-    memset(red, 0x00, EPD_BUF_SIZE);
+    memset(bw, 0xFF, epd_buf_size());
+    memset(red, 0x00, epd_buf_size());
     g_bw = bw; g_red = red;
 
     u8g2_font_t font;
@@ -210,18 +210,18 @@ static void draw_lines_page(uint8_t *bw, uint8_t *red,
 
     draw_title_bar(&font, title);
 
-    /* 5.83(EPD_HEIGHT≥400): 消息块垂直居中(微偏上)而非顶部堆叠,
+    /* 5.83(epd_height()≥400): 消息块垂直居中(微偏上)而非顶部堆叠,
      * 且全部行 2x 字号——400×300 时顶部起排 1x 即可。 */
-    bool large = (EPD_HEIGHT >= 400);
+    bool large = (epd_height() >= 400);
     int body_h = 0;
     for (int i = 0; i < n_lines; i++)
         body_h += large ? 56 : (i == hero_index ? 56 : LINE_H);
     int y = TITLE_H + 8;
     if (large) {
-        int center_gap = (EPD_HEIGHT - TITLE_H - body_h) / 2;
+        int center_gap = (epd_height() - TITLE_H - body_h) / 2;
         if (center_gap > 0) y += center_gap - 12;   /* 微偏上(用户裁决) */
     }
-    for (int i = 0; i < n_lines && y < EPD_HEIGHT - 8; i++) {
+    for (int i = 0; i < n_lines && y < epd_height() - 8; i++) {
         char buf[96];
         strncpy(buf, lines[i], sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
@@ -292,18 +292,18 @@ static void render_lines_from_json(uint8_t *bw, uint8_t *red,
      * 分隔线后为明细行 — 任何行宽都不会出界。
      * 5.83(≥400h)适配(2026-11-17): 垂直偏移改比例化 + 图标放大 + 行距拉伸。 */
     if (hero_index >= 0 && mode_name[0] == 'w' && n > 0) {
-        memset(bw, 0xFF, EPD_BUF_SIZE);
-        memset(red, 0x00, EPD_BUF_SIZE);
+        memset(bw, 0xFF, epd_buf_size());
+        memset(red, 0x00, epd_buf_size());
         g_bw = bw; g_red = red;
         u8g2_font_t font;
         memset(&font, 0, sizeof(font));
         font.draw_hv_line = u8g2_draw_hv_line;
         draw_title_bar(&font, title);
 
-        bool large = (EPD_HEIGHT >= 400);
-        int content_h = EPD_HEIGHT - TITLE_H;
+        bool large = (epd_height() >= 400);
+        int content_h = epd_height() - TITLE_H;
 
-        draw_weather_icon(rows[0], EPD_WIDTH / 2,
+        draw_weather_icon(rows[0], epd_width() / 2,
                           large ? TITLE_H + content_h * 0.20
                                 : TITLE_H + 52);
 
@@ -317,25 +317,25 @@ static void render_lines_from_json(uint8_t *bw, uint8_t *red,
 
         int hero_scale = 2;
         int hw = text_w(&font, cond, hero_scale);
-        if (hw > EPD_WIDTH - 24) hero_scale = 1;
+        if (hw > epd_width() - 24) hero_scale = 1;
         hw = text_w(&font, cond, hero_scale);
         int hero_y = large ? TITLE_H + content_h * 0.42
                            : TITLE_H + 148;
-        draw_body(&font, (EPD_WIDTH - hw) / 2, hero_y, cond,
+        draw_body(&font, (epd_width() - hw) / 2, hero_y, cond,
                   hero_scale, 1);
 
         int div_y = large ? hero_y + 28 : TITLE_H + 162;
-        fill_rect(10, div_y, EPD_WIDTH - 10, div_y + 1, CLR_BLACK);
+        fill_rect(10, div_y, epd_width() - 10, div_y + 1, CLR_BLACK);
 
         /* 明细行:大屏拉伸行距铺满剩余空间(分隔线下留 2 字空隙防划过首行) */
         int detail_n = n - 1;
         if (detail_n < 1) detail_n = 1;
-        int avail_h = EPD_HEIGHT - 10 - (div_y + 36);
+        int avail_h = epd_height() - 10 - (div_y + 36);
         int lh = large ? avail_h / detail_n : LINE_H;
         if (lh > 60) lh = 60;
         if (lh < LINE_H) lh = LINE_H;
         int y = div_y + 36;
-        for (int i = 1; i < n && y < EPD_HEIGHT - 10; i++) {
+        for (int i = 1; i < n && y < epd_height() - 10; i++) {
             draw_body(&font, large ? 24 : 14, y, rows[i],
                       large ? 2 : BODY_SCALE, 0);
             y += lh;
@@ -444,7 +444,7 @@ static void draw_card(u8g2_font_t *font, int x0, int y0, int w, int h,
 {
     /* 5.83(≥400h): 标签/数值用 wqy16 2x(32px), 副标签 wqy16 1x(16px);
      * 垂直偏移改比例化填充大卡片; 图标偏移随卡片高度。 */
-    bool large = (EPD_HEIGHT >= 400);
+    bool large = (epd_height() >= 400);
     int ts = large ? 2 : 1;
 
     if (c->alarm) frame_rect(x0, y0, x0 + w - 1, y0 + h - 1, CLR_RED, 4);
@@ -503,8 +503,8 @@ static void draw_card(u8g2_font_t *font, int x0, int y0, int w, int h,
 
 static void render_status(uint8_t *bw, uint8_t *red)
 {
-    memset(bw, 0xFF, EPD_BUF_SIZE);
-    memset(red, 0x00, EPD_BUF_SIZE);
+    memset(bw, 0xFF, epd_buf_size());
+    memset(red, 0x00, epd_buf_size());
     g_bw = bw; g_red = red;
 
     u8g2_font_t font;
@@ -576,8 +576,8 @@ static void render_status(uint8_t *bw, uint8_t *red)
     int top = TITLE_H + 5;
     int gap = 5;
     int cols = 4, rows = 2;                    /* 8 卡 → 2×4 自适应 */
-    int cw = (EPD_WIDTH - 12 - gap * (cols - 1)) / cols;
-    int ch = (EPD_HEIGHT - top - 6 - gap * (rows - 1)) / rows;
+    int cw = (epd_width() - 12 - gap * (cols - 1)) / cols;
+    int ch = (epd_height() - top - 6 - gap * (rows - 1)) / rows;
     for (int i = 0; i < 8; i++) {
         int r = i / cols, c = i % cols;
         draw_card(&font, 6 + c * (cw + gap), top + r * (ch + gap),
@@ -590,8 +590,8 @@ static void render_status(uint8_t *bw, uint8_t *red)
 
 static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
 {
-    memset(bw, 0xFF, EPD_BUF_SIZE);
-    memset(red, 0x00, EPD_BUF_SIZE);
+    memset(bw, 0xFF, epd_buf_size());
+    memset(red, 0x00, epd_buf_size());
     g_bw = bw; g_red = red;
 
     u8g2_font_t font;
@@ -602,7 +602,7 @@ static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
     draw_title_bar(&font, "本周服药");
 
     /* 5.83(≥400h): 日期/槽位标签 2x(32px), 图例 2x, 格子自动放大无需改 */
-    bool large = (EPD_HEIGHT >= 400);
+    bool large = (epd_height() >= 400);
     int ts = large ? 2 : 1;
 
     cJSON *root = cJSON_Parse(payload);
@@ -614,8 +614,8 @@ static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
     static const char *slot_name[3] = {"早", "中", "晚"};
     int legend_h = large ? 40 : 24;
     int top = TITLE_H + (large ? 30 : 20);
-    int bottom = EPD_HEIGHT - legend_h - 4;
-    int left = 6, right = EPD_WIDTH - 6;
+    int bottom = epd_height() - legend_h - 4;
+    int left = 6, right = epd_width() - 6;
     int colw = (right - left) / 7;
     int rowh = (bottom - top - (large ? 30 : 14)) / 3;
 
@@ -667,7 +667,7 @@ static void render_medgrid(uint8_t *bw, uint8_t *red, const char *payload)
     }
 
     /* 底部图例:■已服(黑) ■漏服(红) □待服(空心) */
-    int ly = EPD_HEIGHT - legend_h - 2;
+    int ly = epd_height() - legend_h - 2;
     int lx = 10;
     static const char *legend[] = {"已服", "漏服", "待服"};
     int lcolor[] = {CLR_BLACK, CLR_RED, CLR_WHITE};
@@ -703,7 +703,7 @@ static void apply_month_decor(uint8_t *bw, uint8_t *red,
 {
     g_bw = bw; g_red = red;
 
-    bool large = (EPD_HEIGHT >= 400);
+    bool large = (epd_height() >= 400);
     /* 数字 2x + sq 52 与 epd_calendar.c draw_month_days 同步(5.83 吋,
      * 擦除块/重画字号不同步会留 1x 残影)。 */
     int ns = large ? 2 : 1;
@@ -716,8 +716,8 @@ static void apply_month_decor(uint8_t *bw, uint8_t *red,
         dim = 29;
     int fw = day_of_week(year, month, 1);
     int nrows = (fw + dim + 6) / 7;
-    int colw = (EPD_WIDTH - margin * 2) / 7;
-    int rowh = (EPD_HEIGHT - wh_y - wh_h - 4) / nrows;
+    int colw = (epd_width() - margin * 2) / 7;
+    int rowh = (epd_height() - wh_y - wh_h - 4) / nrows;
     int sq = large ? 52 : 30;
 
     const cJSON *td = cJSON_GetObjectItem(month_obj, "todo_days");
@@ -829,8 +829,8 @@ static void utf8_trunc_to_width(u8g2_font_t *font, char *s, int max_w);
 
 static void render_dashboard(uint8_t *bw, uint8_t *red, const char *payload)
 {
-    memset(bw, 0xFF, EPD_BUF_SIZE);
-    memset(red, 0x00, EPD_BUF_SIZE);
+    memset(bw, 0xFF, epd_buf_size());
+    memset(red, 0x00, epd_buf_size());
     g_bw = bw; g_red = red;
 
     u8g2_font_t font;
@@ -846,7 +846,7 @@ static void render_dashboard(uint8_t *bw, uint8_t *red, const char *payload)
     /* ---- 布局 ---- */
     const int cal_w = 430;
     const int right_x = cal_w + 6;
-    const int right_w = EPD_WIDTH - right_x - 4;
+    const int right_w = epd_width() - right_x - 4;
 
     /* ---- 标题栏(全宽) ---- */
     draw_title_bar(&font, "安伴");
@@ -898,7 +898,7 @@ static void render_dashboard(uint8_t *bw, uint8_t *red, const char *payload)
         dim = 29;
     int fw = day_of_week(year, month, 1);
     int nrows = (fw + dim + 6) / 7;
-    int cal_bottom = EPD_HEIGHT - 4;
+    int cal_bottom = epd_height() - 4;
     int rowh = (cal_bottom - cal_top) / nrows;
     int ns = 2;           /* 数字 2x(32px), wqy16 统一透明模式(用户裁决 11-18) */
     int sq = 44;          /* 今日高亮块(用户裁决:框再大一些) */
@@ -945,7 +945,7 @@ static void render_dashboard(uint8_t *bw, uint8_t *red, const char *payload)
     }
 
     /* ---- 竖线分隔 ---- */
-    fill_rect(cal_w + 2, TITLE_H + 4, cal_w + 2, EPD_HEIGHT - 4, CLR_BLACK);
+    fill_rect(cal_w + 2, TITLE_H + 4, cal_w + 2, epd_height() - 4, CLR_BLACK);
 
     /* ---- 右栏:天气(无图标,纯文字) ---- */
     int ry = TITLE_H + 12;
@@ -979,12 +979,12 @@ static void render_dashboard(uint8_t *bw, uint8_t *red, const char *payload)
         draw_text(&font, right_x + 4, ry + 8, "天气待开通", 1);
     }
     ry += 56;
-    fill_rect(right_x, ry, EPD_WIDTH - 4, ry, CLR_BLACK);
+    fill_rect(right_x, ry, epd_width() - 4, ry, CLR_BLACK);
     ry += 6;
 
     /* ---- 右栏:待办(今日 HH:MM + 近期 M/D, 总计 ≤9 行) ---- */
     /* 用户裁决(11-18): 标题行红底白字 2x(32px)+加粗(双重绘制偏移 1px) */
-    fill_rect(right_x, ry - 6, EPD_WIDTH - 4, ry + 36, CLR_RED);
+    fill_rect(right_x, ry - 6, epd_width() - 4, ry + 36, CLR_RED);
     u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
     u8g2_SetFontMode(&font, 1);
     u8g2_SetForegroundColor(&font, U_WHITE);
@@ -1027,7 +1027,7 @@ static void render_dashboard(uint8_t *bw, uint8_t *red, const char *payload)
     /* 近期:date+text, 补满到 9 行 */
     cJSON *upc = cJSON_GetObjectItem(dash, "upcoming");
     if (cJSON_IsArray(upc) && line_count < max_lines) {
-        fill_rect(right_x, ry - 6, EPD_WIDTH - 4, ry + 36, CLR_RED);
+        fill_rect(right_x, ry - 6, epd_width() - 4, ry + 36, CLR_RED);
         u8g2_SetFont(&font, u8g2_font_wqy16_t_gb2312a);
         u8g2_SetFontMode(&font, 1);
         u8g2_SetForegroundColor(&font, U_WHITE);
@@ -1091,8 +1091,8 @@ static void utf8_trunc_to_width(u8g2_font_t *font, char *s, int max_w)
 
 static void render_todo_table(uint8_t *bw, uint8_t *red, const char *payload)
 {
-    memset(bw, 0xFF, EPD_BUF_SIZE);
-    memset(red, 0x00, EPD_BUF_SIZE);
+    memset(bw, 0xFF, epd_buf_size());
+    memset(red, 0x00, epd_buf_size());
     g_bw = bw; g_red = red;
 
     static struct { char date[16]; char time[12]; char text[80]; int today; }
@@ -1154,10 +1154,10 @@ static void render_todo_table(uint8_t *bw, uint8_t *red, const char *payload)
     /* 5.83 用户裁决(11-18): 保持 1x 字号——大屏价值=多行(12 满编 vs 4.2 的
      * 7-8 行)+事项列吃满余宽,不做字号放大。列宽 648 专属(c1=100/c2=190)。 */
     const int top = TITLE_H + 4, hdr_h = 26;
-    const int c1 = (EPD_WIDTH >= 600) ? 100 : 64;
-    const int c2 = (EPD_WIDTH >= 600) ? 190 : 122;
-    const int x_end = EPD_WIDTH - 1;
-    int avail = EPD_HEIGHT - 3 - (top + hdr_h);
+    const int c1 = (epd_width() >= 600) ? 100 : 64;
+    const int c2 = (epd_width() >= 600) ? 190 : 122;
+    const int x_end = epd_width() - 1;
+    int avail = epd_height() - 3 - (top + hdr_h);
     int max_rows = avail / 26;
     if (max_rows > 12) max_rows = 12;
     if (n > max_rows) n = max_rows;
@@ -1210,7 +1210,7 @@ void epd_pages_render(int mode, const char *payload_json,
         render_lines_from_json(bw, red, payload, "msg", NULL, 0);
         break;
     case DMODE_TODO:
-        if (EPD_WIDTH >= 400)   /* 4.2吋(400×300)横置:按宽判,HEIGHT=300 会误走旧分支(10-30 实录) */
+        if (epd_width() >= 400)   /* 4.2吋(400×300)横置:按宽判,HEIGHT=300 会误走旧分支(10-30 实录) */
             render_todo_table(bw, red, payload);
         else
             render_lines_from_json(bw, red, payload, "todo", "items", -1);

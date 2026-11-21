@@ -174,7 +174,6 @@ static bool wait_busy2(int engage_ms)
     return true;
 }
 
-#if defined(EPD_PANEL_5IN83)
 
 /* ===== 5.83" 648x480 BWR, UC8179-V2 protocol (Waveshare epd5in83b_V2) ====
  * 2026-11-17: NEW panel (the 2026-11-04 Hanshow salvage was judged dead —
@@ -187,10 +186,10 @@ static bool wait_busy2(int engage_ms)
  *     the 42_V2 and SSD1683 panels must NOT receive it)
  *   - init order: power setting → power-on → remaining registers
  * Planes 0x10 BW (1=white) / 0x13 red (1=red), update 0x12, LOW=busy.
- * Per-frame reinit (hw_reset + registers + PON) retained from the dead-
+ * Per-frame reinit (hw_reset_5 + registers + PON) retained from the dead-
  * panel rewrite: COG write-pointer drift insurance, same as the 4.2". */
 
-static void hw_reset(void)
+static void hw_reset_5(void)
 {
     gpio_set_level(PIN_RES, 1);
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -214,7 +213,7 @@ static bool wait_idle_5(int cap_ms)
     return true;
 }
 
-static bool start_update_and_wait(void)
+static bool start_update_and_wait_5(void)
 {
     send_cmd(0x12);               /* master update */
     bool engaged = false;
@@ -246,10 +245,10 @@ static bool load_registers_and_power_on(void)
     send_cmd(0x00);               /* panel setting: BW OTP LUT */
     send_data(0x0F);
     send_cmd(0x61);               /* resolution — derive from geometry */
-    send_data((EPD_WIDTH >> 8) & 0xFF);
-    send_data(EPD_WIDTH & 0xFF);
-    send_data((EPD_HEIGHT >> 8) & 0xFF);
-    send_data(EPD_HEIGHT & 0xFF);
+    send_data((epd_width() >> 8) & 0xFF);
+    send_data(epd_width() & 0xFF);
+    send_data((epd_height() >> 8) & 0xFF);
+    send_data(epd_height() & 0xFF);
     send_cmd(0x15);               /* VGL/VGH option */
     send_data(0x00);
     send_cmd(0x50);               /* VCOM + data interval — TWO bytes (V2) */
@@ -267,11 +266,11 @@ static bool load_registers_and_power_on(void)
     send_data(0x03);
     send_cmd(0x44);               /* X window: FULL width (bytes) */
     send_data(0x00);
-    send_data((EPD_WIDTH / 8) - 1);
+    send_data((epd_width() / 8) - 1);
     send_cmd(0x45);               /* Y window: FULL height */
     send_data(0x00); send_data(0x00);
-    send_data((EPD_HEIGHT - 1) & 0xFF);
-    send_data((EPD_HEIGHT - 1) >> 8);
+    send_data((epd_height() - 1) & 0xFF);
+    send_data((epd_height() - 1) >> 8);
     send_cmd(0x4E);               /* X cursor = 0 */
     send_data(0x00);
     send_cmd(0x4F);               /* Y cursor = 0 */
@@ -283,7 +282,7 @@ static bool load_registers_and_power_on(void)
  * drifts both across refreshes, exactly like the 4.2 sibling). */
 static bool panel_reinit_5(void)
 {
-    hw_reset();
+    hw_reset_5();
     return load_registers_and_power_on();
 }
 
@@ -294,7 +293,7 @@ static bool panel_reinit_5(void)
  * 0x10/0x13 两平面 + 0x12 触发，无 reinit/无窗口/无断电，连续多帧
  * display 稳定。display 路径必须保持这个最小形态。 */
 
-bool epd_init(void)
+bool epd_init_5(void)
 {
     ensure_buses();
     if (!panel_reinit_5()) {
@@ -306,30 +305,30 @@ bool epd_init(void)
     return true;
 }
 
-void epd_clear(void)
+void epd_clear_5(void)
 {
-    uint8_t *buf = malloc(EPD_BUF_SIZE);
+    uint8_t *buf = malloc(epd_buf_size());
     if (!buf) return;
-    memset(buf, 0xFF, EPD_BUF_SIZE);
+    memset(buf, 0xFF, epd_buf_size());
     send_cmd(0x10);               /* BW plane: all white */
-    send_buf(buf, EPD_BUF_SIZE);
+    send_buf(buf, epd_buf_size());
     send_cmd(0x13);               /* RED plane: none */
-    memset(buf, 0x00, EPD_BUF_SIZE);
-    send_buf(buf, EPD_BUF_SIZE);
+    memset(buf, 0x00, epd_buf_size());
+    send_buf(buf, epd_buf_size());
     free(buf);
-    start_update_and_wait();
+    start_update_and_wait_5();
 }
 
-void epd_display(const uint8_t *bw, const uint8_t *red)
+void epd_display_5(const uint8_t *bw, const uint8_t *red)
 {
     send_cmd(0x10);
-    send_buf(bw, EPD_BUF_SIZE);
+    send_buf(bw, epd_buf_size());
     send_cmd(0x13);
-    send_buf(red, EPD_BUF_SIZE);
-    start_update_and_wait();
+    send_buf(red, epd_buf_size());
+    start_update_and_wait_5();
 }
 
-void epd_sleep(void)
+void epd_sleep_5(void)
 {
     send_cmd(0x02);
     wait_idle_5(5000);
@@ -340,11 +339,11 @@ void epd_sleep(void)
 /* Bench diagnostic (2026-11-17 花屏 hunt): plane-selective display.
  * which: 0=both planes, 1=BW only (red forced none), 2=RED only (BW forced
  * white). Isolates whether corruption begins with the second plane write. */
-void epd_display_planes(const uint8_t *bw, const uint8_t *red, int which);
+void epd_display_planes_5(const uint8_t *bw, const uint8_t *red, int which);
 
-void epd_display_planes(const uint8_t *bw, const uint8_t *red, int which)
+void epd_display_planes_5(const uint8_t *bw, const uint8_t *red, int which)
 {
-    static uint8_t blank[EPD_BUF_SIZE];
+    static uint8_t blank[EPD_BUF_MAX];
     if (which == 1) {
         memset(blank, 0x00, sizeof(blank));
         red = blank;
@@ -353,13 +352,12 @@ void epd_display_planes(const uint8_t *bw, const uint8_t *red, int which)
         bw = blank;
     }
     send_cmd(0x10);
-    send_buf(bw, EPD_BUF_SIZE);
+    send_buf(bw, epd_buf_size());
     send_cmd(0x13);
-    send_buf(red, EPD_BUF_SIZE);
-    start_update_and_wait();
+    send_buf(red, epd_buf_size());
+    start_update_and_wait_5();
 }
 
-#elif defined(EPD_PANEL_42_V2)
 
 /* ====== 4.2" 400x300 tri-color P420016-MF1-A (ESL salvage, anan bench
  * 2026-11-04). SSD1683-style command set with THREE divergences measured by
@@ -370,7 +368,7 @@ void epd_display_planes(const uint8_t *bw, const uint8_t *red, int which)
  *   3. extra 0x21 (display update control) ← 0x80 0x80
  * Planes 0x24/0x26, update 0x22←0xF7 + 0x20 — same as the SSD1683 branch. */
 
-static void hw_reset(void)
+static void hw_reset_42(void)
 {
     gpio_set_level(PIN_RES, 1);
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -381,7 +379,7 @@ static void hw_reset(void)
 }
 
 /* This panel: HIGH = busy. Wait for the idle (LOW) level. */
-static bool wait_idle(int cap_ms)
+static bool wait_idle_42(int cap_ms)
 {
     int ms = 0;
     while (gpio_get_level(PIN_BUSY)) {
@@ -392,24 +390,24 @@ static bool wait_idle(int cap_ms)
     return true;
 }
 
-static void set_ram_window(void)
+static void set_ram_window_42(void)
 {
     send_cmd(0x11);               /* data entry: X inc, Y inc */
     send_data(0x03);
     send_cmd(0x44);               /* x window: bytes 0..49 */
     send_data(0x00);
-    send_data((EPD_WIDTH / 8) - 1);
+    send_data((epd_width() / 8) - 1);
     send_cmd(0x45);               /* y window: 0..299 */
     send_data(0x00); send_data(0x00);
-    send_data((EPD_HEIGHT - 1) & 0xFF);
-    send_data((EPD_HEIGHT - 1) >> 8);
+    send_data((epd_height() - 1) & 0xFF);
+    send_data((epd_height() - 1) >> 8);
     send_cmd(0x4E);               /* cursor (0,0) */
     send_data(0x00);
     send_cmd(0x4F);
     send_data(0x00); send_data(0x00);
 }
 
-static bool start_update_and_wait(void)
+static bool start_update_and_wait_42(void)
 {
     send_cmd(0x22);               /* OTP full refresh */
     send_data(0xF7);
@@ -424,7 +422,7 @@ static bool start_update_and_wait(void)
         if (gpio_get_level(PIN_BUSY)) { engaged = true; break; }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    bool done = wait_idle(120000);
+    bool done = wait_idle_42(120000);
     evlog_record(EV_EPD, EPD_PHASE_UPDATE_ENGAGED, engaged ? 1 : 0);
     return done;
 }
@@ -436,13 +434,13 @@ static bool start_update_and_wait(void)
  * every later frame wraps shifted (calendar header to lower-middle,
  * measured 2026-11-04). So: re-init before every frame. At the 30 s
  * refresh cadence the ~1 s cost is free. */
-static bool panel_reinit(void)
+static bool panel_reinit_42(void)
 {
-    hw_reset();
-    wait_idle(5000);
+    hw_reset_42();
+    wait_idle_42(5000);
     send_cmd(0x12);               /* SW reset */
-    if (!wait_idle(15000)) return false;
-    set_ram_window();
+    if (!wait_idle_42(15000)) return false;
+    set_ram_window_42();
     send_cmd(0x3C);
     send_data(0x05);
     send_cmd(0x18);
@@ -450,14 +448,14 @@ static bool panel_reinit(void)
     send_cmd(0x21);
     send_data(0x80);
     send_data(0x80);
-    wait_idle(5000);
+    wait_idle_42(5000);
     return true;
 }
 
-bool epd_init(void)
+bool epd_init_42(void)
 {
     ensure_buses();
-    if (!panel_reinit()) {
+    if (!panel_reinit_42()) {
         ESP_LOGE(TAG, "no idle after SW reset — check power/wiring (BUSY=%d)",
                  read_busy());
         evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, read_busy());
@@ -468,167 +466,70 @@ bool epd_init(void)
     return true;
 }
 
-void epd_clear(void)
+void epd_clear_42(void)
 {
-    uint8_t *buf = malloc(EPD_BUF_SIZE);
+    uint8_t *buf = malloc(epd_buf_size());
     if (!buf) return;
-    panel_reinit();
-    memset(buf, 0xFF, EPD_BUF_SIZE);
+    panel_reinit_42();
+    memset(buf, 0xFF, epd_buf_size());
     send_cmd(0x24);               /* BW plane: all white */
-    send_buf(buf, EPD_BUF_SIZE);
+    send_buf(buf, epd_buf_size());
     send_cmd(0x26);               /* RED plane: wire 1 = no-red here */
-    send_buf(buf, EPD_BUF_SIZE);
+    send_buf(buf, epd_buf_size());
     free(buf);
-    start_update_and_wait();
+    start_update_and_wait_42();
 }
 
-void epd_display(const uint8_t *bw, const uint8_t *red)
+void epd_display_42(const uint8_t *bw, const uint8_t *red)
 {
     static uint8_t inv[4096];     /* wire 0=red / 1=white ⇒ invert our red */
-    panel_reinit();
+    panel_reinit_42();
     send_cmd(0x24);
-    send_buf(bw, EPD_BUF_SIZE);
+    send_buf(bw, epd_buf_size());
     send_cmd(0x26);
-    for (int off = 0; off < EPD_BUF_SIZE; off += sizeof(inv)) {
-        int n = EPD_BUF_SIZE - off;
+    for (int off = 0; off < epd_buf_size(); off += sizeof(inv)) {
+        int n = epd_buf_size() - off;
         if (n > (int)sizeof(inv)) n = sizeof(inv);
         for (int i = 0; i < n; i++) inv[i] = ~red[off + i];
         send_buf(inv, n);
     }
-    start_update_and_wait();
+    start_update_and_wait_42();
 }
 
-void epd_sleep(void)
+void epd_sleep_42(void)
 {
     send_cmd(0x10);
     send_data(0x01);
 }
 
-#else
 
-/* ============ SSD1683: 4.2" 400x300 Hink-E042A48-A1 (ArtInk4 port) ===== */
-
-static void hw_reset(void)
-{
-    gpio_set_level(PIN_RES, 1);
-    vTaskDelay(pdMS_TO_TICKS(200));
-    gpio_set_level(PIN_RES, 0);
-    esp_rom_delay_us(2000);   /* exactly 2 ms — longer kills the adapter LDO */
-    gpio_set_level(PIN_RES, 1);
-    vTaskDelay(pdMS_TO_TICKS(200));
-}
-
-static void set_ram_window(void)
-{
-    send_cmd(0x44);
-    send_data(0x00);
-    send_data(0x31);      /* 50 bytes per row */
-    send_cmd(0x45);
-    send_data(0x00);
-    send_data(0x00);
-    send_data(0x2B);      /* 300 lines */
-    send_data(0x01);
-    send_cmd(0x4E);
-    send_data(0x00);
-    send_cmd(0x4F);
-    send_data(0x00);
-    send_data(0x00);
-}
-
-static bool start_update_and_wait(void)
-{
-    send_cmd(0x22);                   /* OTP full refresh */
-    send_data(0xF7);
-    send_cmd(0x20);
-    bool engaged = wait_busy2(15000);   /* assert may lag by seconds */
-    evlog_record(EV_EPD, EPD_PHASE_UPDATE_ENGAGED, engaged ? 1 : 0);
-    if (!engaged) vTaskDelay(pdMS_TO_TICKS(16000));   /* ~14 s refresh */
-    return engaged;
-}
-
+/* ===== R26-A2: 运行时面板分派（91 v1.1 切片 A）===== */
 bool epd_init(void)
 {
-    ensure_buses();
-
-    hw_reset();
-    int busy_raw = read_busy();
-    ESP_LOGI(TAG, "BUSY raw after hw_reset: %d", busy_raw);
-    vTaskDelay(pdMS_TO_TICKS(100));   /* BUSY is unreliable right after reset */
-
-    send_cmd(0x12);                   /* SW reset */
-    if (!wait_release(15000)) {
-        ESP_LOGE(TAG, "no response to SW reset — check panel VCI/GND, "
-                 "then SCK/SDA/CS wiring (BUSY=%d)", read_busy());
-        evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, busy_raw);
-        return false;
-    }
-
-    send_cmd(0x01);                   /* driver: 300 lines */
-    send_data(0x2B);
-    send_data(0x01);
-    send_data(0x00);
-    send_cmd(0x11);                   /* data entry: X inc, Y dec */
-    send_data(0x03);
-    send_cmd(0x44);
-    send_data(0x00);
-    send_data(0x31);
-    send_cmd(0x45);
-    send_data(0x00);
-    send_data(0x00);
-    send_data(0x2B);
-    send_data(0x01);
-    send_cmd(0x3C);                   /* border waveform */
-    send_data(0x05);
-    send_cmd(0x18);                   /* temp sensor: internal */
-    send_data(0x80);
-    send_cmd(0x4E);
-    send_data(0x00);
-    send_cmd(0x4F);
-    send_data(0x00);
-    send_data(0x00);
-
-    bool ok = wait_release(15000);
-    if (ok) {
-        ESP_LOGI(TAG, "SSD1683 init done");
-        evlog_record(EV_EPD, EPD_PHASE_INIT_OK, busy_raw);
-    } else {
-        evlog_record(EV_EPD, EPD_PHASE_INIT_FAIL, busy_raw);
-    }
-    return ok;
+    return epd_panel_is_583() ? epd_init_5() : epd_init_42();
 }
 
 void epd_clear(void)
 {
-    set_ram_window();
-    uint8_t *buf = malloc(EPD_BUF_SIZE);
-    if (!buf) return;
-    memset(buf, 0xFF, EPD_BUF_SIZE);
-    send_cmd(0x24);                   /* BW plane: all white */
-    send_buf(buf, EPD_BUF_SIZE);
-    memset(buf, 0x00, EPD_BUF_SIZE);
-    send_cmd(0x26);                   /* RED plane: none */
-    send_buf(buf, EPD_BUF_SIZE);
-    free(buf);
-    start_update_and_wait();
+    if (epd_panel_is_583()) epd_clear_5(); else epd_clear_42();
 }
 
 void epd_display(const uint8_t *bw, const uint8_t *red)
 {
-    set_ram_window();
-    send_cmd(0x24);
-    send_buf(bw, EPD_BUF_SIZE);
-    send_cmd(0x26);
-    send_buf(red, EPD_BUF_SIZE);
-    start_update_and_wait();
+    if (epd_panel_is_583()) epd_display_5(bw, red); else epd_display_42(bw, red);
 }
 
 void epd_sleep(void)
 {
-    send_cmd(0x10);
-    send_data(0x01);
+    if (epd_panel_is_583()) epd_sleep_5(); else epd_sleep_42();
 }
 
-#endif /* panel variant */
+void epd_display_planes(const uint8_t *bw, const uint8_t *red, int which)
+{
+    if (!epd_panel_is_583()) return;   /* 平面隔离 = 5.83 bench 专用 */
+    epd_display_planes_5(bw, red, which);
+}
+
 
 /* ---- Diagnostics (panel-agnostic) ---- */
 
@@ -682,13 +583,9 @@ bool epd_wiring_check(epd_wiring_t *out)
     /* 3. Reset command over SPI -> BUSY reaction proves SCK/SDA/CS/DC. */
     for (int i = 0; i < 500 && read_busy() == 0; i++)
         esp_rom_delay_us(2000);
-#if defined(EPD_PANEL_5IN83)
-    send_cmd(0x12);                  /* on UC8179 this is the update cmd */
-    out->cmd_reaction = wait_busy2(15000);
-#else
-    send_cmd(0x12);                  /* SSD1683 SW reset */
-    out->cmd_reaction = wait_busy2(5000);
-#endif
+    send_cmd(0x12);
+    /* UC8179=update cmd(busy 长) / SSD1683=SW reset(busy 短) */
+    out->cmd_reaction = wait_busy2(epd_panel_is_583() ? 15000 : 5000);
     /* Drain the post-reset busy period so a later init starts clean. */
     for (int i = 0; i < 500 && read_busy() == 0; i++)
         esp_rom_delay_us(2000);

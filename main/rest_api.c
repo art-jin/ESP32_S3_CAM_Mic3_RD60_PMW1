@@ -931,10 +931,10 @@ static esp_err_t handler_epd_frame(httpd_req_t *req)
     }
 
     size_t hdr_cap = 1100;
-    size_t w = EPD_WIDTH / step, h = EPD_HEIGHT / step;
+    size_t w = epd_width() / step, h = epd_height() / step;
     size_t cap = hdr_cap + w * h + h + 16;
-    uint8_t *bw = malloc(EPD_BUF_SIZE);
-    uint8_t *red = malloc(EPD_BUF_SIZE);
+    uint8_t *bw = malloc(epd_buf_size());
+    uint8_t *red = malloc(epd_buf_size());
     char *out = malloc(cap);
     if (!bw || !red || !out) {
         free(bw); free(red); free(out);
@@ -966,8 +966,8 @@ static esp_err_t handler_epd_frame(httpd_req_t *req)
     if (httpd_req_get_url_query_str(req, qall, sizeof(qall)) == ESP_OK &&
         httpd_query_key_value(qall, "blank", qblank, sizeof(qblank)) == ESP_OK &&
         qblank[0] == '1') {
-        memset(bw, 0xFF, EPD_BUF_SIZE);
-        memset(red, 0x00, EPD_BUF_SIZE);
+        memset(bw, 0xFF, epd_buf_size());
+        memset(red, 0x00, epd_buf_size());
     }
 
     /* &hex=red|bw&off=N&len=N — raw plane bytes (fingerprint the junk). */
@@ -981,7 +981,7 @@ static esp_err_t handler_epd_frame(httpd_req_t *req)
         if (httpd_query_key_value(qall, "len", v, sizeof(v)) == ESP_OK) len = atoi(v);
         if (off < 0) off = 0;
         if (len < 1) len = 1;
-        if (off + len > EPD_BUF_SIZE) len = EPD_BUF_SIZE - off;
+        if (off + len > epd_buf_size()) len = epd_buf_size() - off;
         const uint8_t *src = (qhex[0] == 'r') ? red : bw;
         httpd_resp_set_type(req, HTTPD_TYPE_TEXT);
         char lbuf[64];
@@ -1001,9 +1001,9 @@ static esp_err_t handler_epd_frame(httpd_req_t *req)
                      display_mode_name(mode), step,
                      display_mode_payload());
     char *p = out + n;
-    for (int y = 0; y + step <= EPD_HEIGHT; y += step) {
-        for (int x = 0; x + step <= EPD_WIDTH; x += step) {
-            int idx = y * (EPD_WIDTH / 8) + x / 8;
+    for (int y = 0; y + step <= epd_height(); y += step) {
+        for (int x = 0; x + step <= epd_width(); x += step) {
+            int idx = y * (epd_width() / 8) + x / 8;
             uint8_t bit = 1u << (7 - x % 8);
             *p++ = (red[idx] & bit) ? 'R'
                  : ((bw[idx] & bit) ? '.' : '#');
