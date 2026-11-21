@@ -8,6 +8,10 @@
 #include "mqtt_publisher.h"
 #include "zone_tracker.h"
 #include "mode_manager.h"
+#include "identity.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
 
 static const char *TAG = "cfg";
 
@@ -97,6 +101,29 @@ static void cfg_handler(const char *payload, int len)
                          "%s\"assoc_gate\"", alen ? "," : "");
     }
 
+    /* R26-A4/A5: 面板几何下发（guardian screen_size 映射：4.2->1 5.8->2）。
+     * 同值=幂等 no-op；异值=写 NVS+回执，1.5s 后自重启生效（外户无人按
+     * 电源，回执先发设备再动——91 D-2b/R26-6）。 */
+    bool reboot_pending = false;
+    if (jget_int(payload, "epd_panel", &tmp)) {
+        if (tmp == 1 || tmp == 2) {
+            if (identity_epd_panel() == tmp) {
+                alen += snprintf(applied + alen, sizeof(applied) - alen,
+                                 "%s\"epd_panel\"", alen ? "," : "");
+            } else if (identity_set_epd_panel(tmp) == ESP_OK) {
+                alen += snprintf(applied + alen, sizeof(applied) - alen,
+                                 "%s\"epd_panel\"", alen ? "," : "");
+                reboot_pending = true;
+            } else {
+                rlen += snprintf(rejected + rlen, sizeof(rejected) - rlen,
+                                 "%s\"epd_panel(nvs_fail)\"", rlen ? "," : "");
+            }
+        } else {
+            rlen += snprintf(rejected + rlen, sizeof(rejected) - rlen,
+                             "%s\"epd_panel(bad_value)\"", rlen ? "," : "");
+        }
+    }
+
     /* 回执（guardian 对账锚点；req_id 原样透传） */
     char topic[80];
     char receipt[384];
@@ -107,6 +134,11 @@ static void cfg_handler(const char *payload, int len)
     bool ok = mqtt_publisher_publish_raw(topic, receipt, 1, 0);
     ESP_LOGI(TAG, "cfg_set req=%s applied=[%s] rejected=[%s] receipt=%s",
              req_id, applied, rejected, ok ? "sent" : "FAIL(not connected)");
+    if (reboot_pending) {
+        ESP_LOGW(TAG, "epd_panel changed -> rebooting in 1.5s (receipt sent)");
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        esp_restart();
+    }
 }
 
 void cfg_channel_init(void)

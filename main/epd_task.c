@@ -212,12 +212,15 @@ const epd_result_t *epd_last_result(void)
 
 /* Plane-selective bench test (2026-11-17): render the test pattern into the
  * static buffers and push with the requested plane filter.
- * 5.83 only — epd_display_planes 未在 4.2 驱动实现（11-21 换板链接实錄）。 */
-#if defined(EPD_PANEL_5IN83)
+ * 5.83 only — 运行时门控（R26-A2 单 bin）。 */
 void epd_task_plane_test(int which);
 void epd_task_plane_test(int which)
 {
+    if (!epd_panel_is_583()) {
+        ESP_LOGW(TAG, "plane test: 5.83 only, current panel=%d",
+                 epd_panel_current());
+        return;
+    }
     draw_test_pattern(bw_buf, red_buf);
     epd_display_planes(bw_buf, red_buf, which);
 }
-#endif

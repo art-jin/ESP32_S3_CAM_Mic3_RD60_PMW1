@@ -796,11 +796,15 @@ static esp_err_t handler_memtest(httpd_req_t *req)
 }
 
 /* POST /api/epd/plane?device_id=X&w=1|r=1 — plane-selective test pattern:
- * renders draw_test_pattern and sends BW-only / RED-only / both. 5.83 only. */
-#if defined(EPD_PANEL_5IN83)
+ * renders draw_test_pattern and sends BW-only / RED-only / both.
+ * 5.83 only（运行时门控，R26-A2 单 bin）。 */
 static esp_err_t handler_epd_plane(httpd_req_t *req)
 {
     if (!check_auth(req)) return ESP_OK;
+    if (!epd_panel_is_583()) {
+        return send_error(req, 404, "panel_unsupported",
+                          "plane isolation is a 5.83 bench feature");
+    }
     int which = 0;
     char q[64] = {0};
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
@@ -815,7 +819,6 @@ static esp_err_t handler_epd_plane(httpd_req_t *req)
     snprintf(jb, sizeof(jb), "{\"ok\":true,\"which\":%d,\"eta_s\":30}", which);
     return send_json_ok(req, jb);
 }
-#endif
 
 static esp_err_t handler_epd_test(httpd_req_t *req)
 {
@@ -1196,6 +1199,17 @@ static esp_err_t handler_identity_post(httpd_req_t *req)
     const char *w1s     = json_get_str(body, "wifi1_ssid",       v_w1s,    sizeof(v_w1s))    && v_w1s[0]    ? v_w1s    : NULL;
     const char *w1p     = json_get_str(body, "wifi1_pass",       v_w1p,    sizeof(v_w1p))    && v_w1p[0]    ? v_w1p    : NULL;
 
+    /* R26-A1: epd_panel 单键可改（1=4.2 2=5.83），与 MQTT 身份解耦 */
+    char v_panel[8];
+    const char *panel_s = json_get_str(body, "epd_panel", v_panel,
+                                       sizeof(v_panel)) && v_panel[0]
+                              ? v_panel : NULL;
+    int panel = panel_s ? atoi(panel_s) : 0;
+    if (panel && (panel < 1 || panel > 2)) {
+        send_error(req, 400, "bad_panel", "epd_panel must be 1(4.2) or 2(5.83)");
+        return ESP_OK;
+    }
+
     /* 半套 MQTT 身份会把脖子打到"NVS user + 旧 prefix"混合态——要动
      * MQTT 身份，user/pass/prefix 必须整套（broker/expect/wifi 可单改） */
     int mq_qty = (user ? 1 : 0) + (pass ? 1 : 0) + (prefix ? 1 : 0);
@@ -1213,6 +1227,10 @@ static esp_err_t handler_identity_post(httpd_req_t *req)
     /* 写后回读校验（89a H-2）：不过不重启，保持可注入状态 */
     if (!identity_verify(broker, user, pass, prefix, expect, w0s, w0p, w1s, w1p)) {
         send_error(req, 500, "verify_failed", "NVS readback mismatch");
+        return ESP_OK;
+    }
+    if (panel && identity_set_epd_panel(panel) != ESP_OK) {
+        send_error(req, 500, "panel_write_failed", "epd_panel NVS write failed");
         return ESP_OK;
     }
 
@@ -1295,11 +1313,9 @@ esp_err_t rest_api_start(void)
     static const httpd_uri_t uri_memtest = {
         .uri = "/api/memtest", .method = HTTP_GET, .handler = handler_memtest
     };
-#if defined(EPD_PANEL_5IN83)
     static const httpd_uri_t uri_epd_plane = {
         .uri = "/api/epd/plane", .method = HTTP_POST, .handler = handler_epd_plane
     };
-#endif
     static const httpd_uri_t uri_epd_sweep = {
         .uri = "/api/epd/sweep", .method = HTTP_POST, .handler = handler_epd_sweep
     };
@@ -1335,9 +1351,7 @@ esp_err_t rest_api_start(void)
     httpd_register_uri_handler(s_server, &uri_epd_recover);
     httpd_register_uri_handler(s_server, &uri_epd_status);
     httpd_register_uri_handler(s_server, &uri_epd_sweep);
-#if defined(EPD_PANEL_5IN83)
     httpd_register_uri_handler(s_server, &uri_epd_plane);
-#endif
     httpd_register_uri_handler(s_server, &uri_memtest);
     httpd_register_uri_handler(s_server, &uri_epd_frame);
     httpd_register_uri_handler(s_server, &uri_point);

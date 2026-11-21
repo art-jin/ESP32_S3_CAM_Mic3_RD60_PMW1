@@ -21,6 +21,7 @@ static const char *TAG = "identity";
 #define K_W0PASS "wifi0_pass"
 #define K_W1SSID "wifi1_ssid"
 #define K_W1PASS "wifi1_pass"
+#define K_PANEL  "epd_panel"
 
 /* 内存缓存（首次加载后只读） */
 static char s_broker[128] = {0};
@@ -30,6 +31,7 @@ static char s_prefix[64]  = {0};
 static char s_expect[24]  = {0};
 static char s_wssid[2][40] = {{0}};
 static char s_wpass[2][72] = {{0}};
+static int  s_panel = -1;   /* R26: -1 未读 0 未设 1/2 面板 */
 static bool s_loaded = false;
 
 static void nvs_read_str(nvs_handle_t h, const char *key, char *dst, size_t dst_sz)
@@ -64,6 +66,9 @@ static void ensure_loaded(void)
     nvs_read_str(h, K_W0PASS, s_wpass[0], sizeof(s_wpass[0]));
     nvs_read_str(h, K_W1SSID, s_wssid[1], sizeof(s_wssid[1]));
     nvs_read_str(h, K_W1PASS, s_wpass[1], sizeof(s_wpass[1]));
+    uint8_t panel = 0;
+    if (nvs_get_u8(h, K_PANEL, &panel) != ESP_OK) panel = 0;
+    s_panel = panel;
     nvs_close(h);
 
     ESP_LOGI(TAG, "identity loaded: %s (user=%s prefix=%s wifi0=%s)",
@@ -114,6 +119,36 @@ const char *identity_wifi_pass(int slot)
     ensure_loaded();
     if (slot == 0) return s_wpass[0][0] ? s_wpass[0] : WIFI0_PASSWORD;
     return s_wpass[1][0] ? s_wpass[1] : WIFI1_PASSWORD;
+}
+
+int identity_epd_panel(void)
+{
+    ensure_loaded();
+    return (s_panel == 1 || s_panel == 2) ? s_panel : 0;
+}
+
+esp_err_t identity_set_epd_panel(int panel)
+{
+    if (panel != 1 && panel != 2) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(h, K_PANEL, (uint8_t)panel);
+    if (err == ESP_OK) err = nvs_commit(h);
+    uint8_t rb = 0;
+    if (err == ESP_OK &&
+        (nvs_get_u8(h, K_PANEL, &rb) != ESP_OK || rb != (uint8_t)panel))
+        err = ESP_FAIL;
+    nvs_close(h);
+    if (err == ESP_OK) {
+        s_panel = panel;
+        ESP_LOGI(TAG, "epd_panel set -> %d (%s)", panel,
+                 panel == 2 ? "5.83" : "4.2");
+    } else {
+        ESP_LOGE(TAG, "epd_panel write/verify failed: %s",
+                 esp_err_to_name(err));
+    }
+    return err;
 }
 
 bool identity_is_provisioned(void)
@@ -194,10 +229,11 @@ const char *identity_summary_json(void)
              "{\"provisioned\":%s,"
              "\"broker\":\"%s\",\"user\":\"%s\",\"pass\":\"***\","
              "\"prefix\":\"%s\",\"expect_device_id\":\"%s\","
-             "\"wifi0_ssid\":\"%s\",\"wifi1_ssid\":\"%s\"}",
+             "\"wifi0_ssid\":\"%s\",\"wifi1_ssid\":\"%s\",\"epd_panel\":%d}",
              identity_is_provisioned() ? "true" : "false",
              identity_mqtt_broker(), identity_mqtt_user(),
              identity_mqtt_prefix(), identity_expect_device_id(),
-             identity_wifi_ssid(0), identity_wifi_ssid(1));
+             identity_wifi_ssid(0), identity_wifi_ssid(1),
+             identity_epd_panel());
     return json;
 }

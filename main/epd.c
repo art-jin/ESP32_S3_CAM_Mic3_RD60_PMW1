@@ -136,19 +136,6 @@ static void ensure_buses(void)
     }
 }
 
-/* ArtInk58 semantics for init resets: wait for BUSY release (LOW->HIGH),
- * cap at cap_ms; instant pass if already idle. */
-static bool wait_release(int cap_ms)
-{
-    int ms = 0;
-    while (!read_busy()) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        ms += 10;
-        if (ms > cap_ms) return false;
-    }
-    return true;
-}
-
 /* Two-phase refresh wait (ArtInk58-verified): LUT load + temperature
  * conversion can delay the busy ASSERT by seconds — allow a 15 s engage
  * window, then wait out the refresh (120 s cap for tri-color). */

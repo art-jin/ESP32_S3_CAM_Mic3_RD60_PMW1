@@ -44,3 +44,8 @@ bool identity_verify(const char *broker, const char *user,
 
 /* REST 只读摘要（密码掩码） */
 const char *identity_summary_json(void);
+
+/* R26-A1: 面板几何（NVS epd_panel u8；0=未设→编译默认 4.2）。
+ * 单键可改，不属 MQTT 身份 user/pass/prefix 整套约束。 */
+int identity_epd_panel(void);                    /* 0=未设 1=4.2 2=5.83 */
+esp_err_t identity_set_epd_panel(int panel);     /* 单键写+回读校验 */
