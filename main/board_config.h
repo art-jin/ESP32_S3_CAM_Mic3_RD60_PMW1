@@ -55,8 +55,9 @@
      *                        targeted was judged DEAD 11-05 (RAM not holding
      *                        writes) — docs/74.
      * Exactly one variant may be defined. */
-    /* 2026-11-17: MENGOR switches to the new 5.83 (M5 bench). 4.2 P420016
-     * stays one reflash away — flip back if the bench needs the old panel. */
+    /* 2026-11-21: greywolf(4.2) ㉑② 验证毕已收工；切回 5.83 烧 anan。
+     * 教训:面板几何编译期、不在 NVS identity——换板烧录前必核此行
+     * （同族:mqtt_creds 活动段/mDNS 名）。 */
     // #define EPD_PANEL_42_V2     1
     #define EPD_PANEL_5IN83       1
     #define EPD_SCK_GPIO        4

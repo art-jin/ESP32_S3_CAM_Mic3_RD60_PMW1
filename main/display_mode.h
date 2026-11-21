@@ -6,7 +6,8 @@
 
 /* docs/74 §4/M1 — 显示模式注册表。REST /api/display 与 MQTT cmd/display
  * 同构入口:两者最终都调 display_mode_show(),载荷即 74 §4 的完整 JSON
- * (渲染器自取 mode 专属字段)。TTL 到期自动回默认页(月历)。 */
+ * (渲染器自取 mode 专属字段)。TTL 到期回退:当日偏好主页(ttl>=86400
+ * 的 dash,㉑②)→ 当日 overlay 暂存 → 纯月历。 */
 
 enum {
     DMODE_CALENDAR = 0,        /* 默认页:月历(本地渲染,回退目标) */

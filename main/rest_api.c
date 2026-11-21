@@ -796,7 +796,8 @@ static esp_err_t handler_memtest(httpd_req_t *req)
 }
 
 /* POST /api/epd/plane?device_id=X&w=1|r=1 — plane-selective test pattern:
- * renders draw_test_pattern and sends BW-only / RED-only / both. */
+ * renders draw_test_pattern and sends BW-only / RED-only / both. 5.83 only. */
+#if defined(EPD_PANEL_5IN83)
 static esp_err_t handler_epd_plane(httpd_req_t *req)
 {
     if (!check_auth(req)) return ESP_OK;
@@ -814,6 +815,7 @@ static esp_err_t handler_epd_plane(httpd_req_t *req)
     snprintf(jb, sizeof(jb), "{\"ok\":true,\"which\":%d,\"eta_s\":30}", which);
     return send_json_ok(req, jb);
 }
+#endif
 
 static esp_err_t handler_epd_test(httpd_req_t *req)
 {
@@ -1293,9 +1295,11 @@ esp_err_t rest_api_start(void)
     static const httpd_uri_t uri_memtest = {
         .uri = "/api/memtest", .method = HTTP_GET, .handler = handler_memtest
     };
+#if defined(EPD_PANEL_5IN83)
     static const httpd_uri_t uri_epd_plane = {
         .uri = "/api/epd/plane", .method = HTTP_POST, .handler = handler_epd_plane
     };
+#endif
     static const httpd_uri_t uri_epd_sweep = {
         .uri = "/api/epd/sweep", .method = HTTP_POST, .handler = handler_epd_sweep
     };
@@ -1331,8 +1335,10 @@ esp_err_t rest_api_start(void)
     httpd_register_uri_handler(s_server, &uri_epd_recover);
     httpd_register_uri_handler(s_server, &uri_epd_status);
     httpd_register_uri_handler(s_server, &uri_epd_sweep);
-    httpd_register_uri_handler(s_server, &uri_memtest);
+#if defined(EPD_PANEL_5IN83)
     httpd_register_uri_handler(s_server, &uri_epd_plane);
+#endif
+    httpd_register_uri_handler(s_server, &uri_memtest);
     httpd_register_uri_handler(s_server, &uri_epd_frame);
     httpd_register_uri_handler(s_server, &uri_point);
     httpd_register_uri_handler(s_server, &uri_shake);

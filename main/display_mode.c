@@ -40,6 +40,14 @@ static int       s_overlay_day = -1;   /* 暂存日戳 yyyymmdd;-1=无;隔天失
 static uint32_t  s_seq = 0;
 static TaskHandle_t s_epd_task;
 
+/* ㉑②(2026-11-21): 偏好主页 — guardian 以 ttl_sec>=86400 下发的 dash 视为
+ * 当日常驻页(晨推/药后补推均此语义),临时页 TTL 到期优先回退它而非硬编码
+ * 月历;按天戳记,隔天失效等云补推(同 overlay 暂存语义)。elder 屏(4.2)
+ * 不收 dash,回退路径不受影响。 */
+static int       s_home_mode = -1;   /* 目前仅 DMODE_DASH 会被登记 */
+static char      s_home_json[DISPLAY_PAYLOAD_MAX];
+static int       s_home_day = -1;    /* yyyymmdd;-1=未登记 */
+
 #define TTL_PENDING INT64_MAX
 
 static int today_key(void)
@@ -80,6 +88,24 @@ static bool overlay_stash_valid(void)
     return s_overlay_json[0] != '\0' && s_overlay_day == today_key();
 }
 
+static bool home_valid(void)
+{
+    return s_home_mode == DMODE_DASH && s_home_json[0] != '\0' &&
+           s_home_day == today_key();
+}
+
+/* 长时效 dash(ttl>=86400)=当日偏好主页;语音临时 dash(90s)不登记 */
+static void stash_home_from(int mode, const char *payload_json, int ttl_sec)
+{
+    if (mode != DMODE_DASH || !payload_json || payload_json[0] == '\0' ||
+        ttl_sec < 86400)
+        return;
+    strncpy(s_home_json, payload_json, DISPLAY_PAYLOAD_MAX - 1);
+    s_home_json[DISPLAY_PAYLOAD_MAX - 1] = '\0';
+    s_home_day = today_key();
+    s_home_mode = DMODE_DASH;
+}
+
 int display_mode_from_name(const char *name)
 {
     if (!name) return -1;
@@ -116,6 +142,13 @@ static void nvs_save_locked(int mode, const char *payload)
                          strlen(s_overlay_json) + 1) != ESP_OK) ok = false;
         if (nvs_set_i32(h, "ovl_day", s_overlay_day) != ESP_OK) ok = false;
     }
+    if (s_home_json[0]) {
+        if (nvs_set_u8(h, "home_mode", (uint8_t)s_home_mode) != ESP_OK)
+            ok = false;
+        if (nvs_set_blob(h, "home_json", s_home_json,
+                         strlen(s_home_json) + 1) != ESP_OK) ok = false;
+        if (nvs_set_i32(h, "home_day", s_home_day) != ESP_OK) ok = false;
+    }
     if (nvs_commit(h) != ESP_OK) ok = false;
     nvs_close(h);
     if (!ok) ESP_LOGW(TAG, "nvs persist partial failure");
@@ -137,8 +170,10 @@ void display_mode_replay_nvs(void)
     }
     uint8_t mode = DMODE_CALENDAR;
     size_t len = 0;
-    char *json = NULL, *ovl = NULL;
+    char *json = NULL, *ovl = NULL, *home = NULL;
     int32_t ovl_day = -1;
+    uint8_t home_mode = 255;
+    int32_t home_day = -1;
     bool have = nvs_get_u8(h, "mode", &mode) == ESP_OK;
     if (have) {
         if (nvs_get_blob(h, "json", NULL, &len) == ESP_OK && len > 1 &&
@@ -155,6 +190,16 @@ void display_mode_replay_nvs(void)
                 ovl[olen - 1] != '\0') ovl[olen - 1] = '\0';
             nvs_get_i32(h, "ovl_day", &ovl_day);
         }
+        size_t hlen = 0;
+        if (nvs_get_u8(h, "home_mode", &home_mode) == ESP_OK &&
+            home_mode < DMODE_COUNT &&
+            nvs_get_blob(h, "home_json", NULL, &hlen) == ESP_OK && hlen > 1 &&
+            hlen <= DISPLAY_PAYLOAD_MAX) {
+            home = malloc(hlen);
+            if (home && nvs_get_blob(h, "home_json", home, &hlen) == ESP_OK &&
+                home[hlen - 1] != '\0') home[hlen - 1] = '\0';
+            nvs_get_i32(h, "home_day", &home_day);
+        }
     }
     nvs_close(h);
 
@@ -168,6 +213,15 @@ void display_mode_replay_nvs(void)
         s_overlay_day = (int)ovl_day;
     }
     free(ovl);
+
+    /* 恢复偏好主页(原日戳 — 跨日由 home_valid() 治理,不复活) */
+    if (home && home[0] && home_mode == DMODE_DASH) {
+        strncpy(s_home_json, home, DISPLAY_PAYLOAD_MAX - 1);
+        s_home_json[DISPLAY_PAYLOAD_MAX - 1] = '\0';
+        s_home_day = (int)home_day;
+        s_home_mode = DMODE_DASH;
+    }
+    free(home);
 
     bool replay_page = true;
     if (mode == DMODE_CALENDAR_OVERLAY && s_overlay_day != today_key())
@@ -218,6 +272,7 @@ bool display_mode_show(int mode, const char *payload_json, int ttl_sec)
         s_ttl_req_sec = ttl_sec;
         s_expires_ms = TTL_PENDING;   /* 上屏完成(display_mode_rendered)起算 */
     }
+    stash_home_from(mode, s_payload, ttl_sec);
     s_seq++;
     nvs_save_locked(mode, s_payload);   /* R2:当前页+overlay 暂存落 NVS */
 
@@ -250,9 +305,11 @@ int display_mode_active(void)
     int mode = s_mode;
     if (s_expires_ms != TTL_PENDING && s_expires_ms >= 0 &&
         esp_timer_get_time() / 1000 >= s_expires_ms) {
-        /* TTL 到期 — 回退页语义：当日 overlay 暂存有效 → 带框线月历
-         * (M2 常驻主页),否则纯月历。 */
-        mode = overlay_stash_valid() ? DMODE_CALENDAR_OVERLAY : DMODE_CALENDAR;
+        /* TTL 到期 — 回退页语义(㉑②)：当日偏好主页(dash)优先；
+         * 否则当日 overlay 暂存 → 带框线月历(M2 常驻主页)；否则纯月历。 */
+        if (home_valid()) mode = s_home_mode;
+        else mode = overlay_stash_valid() ? DMODE_CALENDAR_OVERLAY
+                                          : DMODE_CALENDAR;
     }
     xSemaphoreGive(s_lock);
     return mode;
@@ -267,8 +324,9 @@ const char *display_mode_payload(void)
     const char *p = s_payload;
     if (s_mode != DMODE_CALENDAR_OVERLAY &&
         s_expires_ms != TTL_PENDING && s_expires_ms >= 0 &&
-        esp_timer_get_time() / 1000 >= s_expires_ms && overlay_stash_valid()) {
-        p = s_overlay_json;
+        esp_timer_get_time() / 1000 >= s_expires_ms) {
+        if (home_valid()) p = s_home_json;
+        else if (overlay_stash_valid()) p = s_overlay_json;
     }
     xSemaphoreGive(s_lock);
     return p;
