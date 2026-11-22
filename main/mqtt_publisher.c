@@ -113,6 +113,11 @@ static void online_pub_task(void *arg)
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+        /* 11-23 存活案：CONNECTED 事件后立即注入订阅/发布会与 CONNACK
+         * 收尾竞态→连接刚建即被 EOF 掐死（0x8008×2-3 轮后偶然存活，
+         * 三连复现）。歇 1s 让客户端完全就绪再动手。 */
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
         /* 订阅三通道（串行+间隔，避开 esp-mqtt 报文分配竞态） */
         esp_mqtt_client_subscribe(s_client, s_topic_cfg, 1);
         vTaskDelay(pdMS_TO_TICKS(50));

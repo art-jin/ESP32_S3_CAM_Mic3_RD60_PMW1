@@ -31,9 +31,12 @@
 static const char *TAG = "ota_neck";
 
 static void ota_publish(const char *prefix, const char *payload) {
+    /* 11-23 存活案终破：原死码把 strlen 当 qos 传（真签名 qos/retain）→
+     * 每次上报 QoS≈50 → mosquitto "Invalid QoS in PUBLISH, disconnecting"
+     * → 连接刚建即被踢（三连复现的 EOF 环） */
     char topic[128];
     snprintf(topic, sizeof(topic), "%s/status/ota", prefix);
-    mqtt_publisher_publish_raw(topic, payload, (int)strlen(payload), 1);
+    mqtt_publisher_publish_raw(topic, payload, 1, 0);
 }
 
 static bool url_allowed(const char *url) {
