@@ -1,4 +1,5 @@
 #include "mqtt_publisher.h"
+#include "ota_neck.h"
 
 #include <string.h>
 #include <sys/time.h>
@@ -96,6 +97,68 @@ static char s_topic_online[64];
 static char s_topic_cfg[64];
 static char s_topic_display[64];
 static char s_topic_ota[64];
+
+/* R26-D（11-21④ 竞态根治）：online 发布移出 CONNECTED 回调——回调内
+ * esp_mqtt_client_publish 的入队存在间歇性静默失败（08:06 实案：会话活、
+ * 发布丢、guardian 无从感知重启）。本任务上下文发布 + PUBACK 记账
+ * （MQTT_EVENT_PUBLISHED 消账）+3 次重试 + 首个 keepalive 周期后兜底补发
+ * （retained 幂等零成本）。 */
+static TaskHandle_t s_online_task;
+static volatile int  s_online_msg_id = -1;
+static volatile bool s_online_acked = true;
+
+static void online_pub_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        /* 订阅三通道（串行+间隔，避开 esp-mqtt 报文分配竞态） */
+        esp_mqtt_client_subscribe(s_client, s_topic_cfg, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        esp_mqtt_client_subscribe(s_client, s_topic_display, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        esp_mqtt_client_subscribe(s_client, s_topic_ota, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+
+        /* R26-B2/B3：boot 上报 + mark_valid（WiFi+MQTT 首连=生命体征） */
+        {
+            extern const char *mqtt_publisher_prefix(void);
+            const char *pfx = mqtt_publisher_prefix();
+            ota_neck_boot_check(pfx);
+            ota_neck_mark_valid(pfx);
+        }
+        ESP_LOGI(TAG, "connected; subs cfg+display+ota; boot report done; "
+                 "heap free=%u min=%u",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)esp_get_minimum_free_heap_size());
+
+        s_online_acked = false;
+        for (int attempt = 1; attempt <= 3 && !s_online_acked; attempt++) {
+            int id = esp_mqtt_client_publish(s_client, s_topic_online,
+                                             "1", 1, 1, 1);
+            s_online_msg_id = id;
+            ESP_LOGI(TAG, "online publish attempt %d -> msg_id %d",
+                     attempt, id);
+            if (id < 0) {
+                vTaskDelay(pdMS_TO_TICKS(500));
+                continue;
+            }
+            for (int i = 0; i < 30 && !s_online_acked; i++)
+                vTaskDelay(pdMS_TO_TICKS(100));
+            if (!s_online_acked)
+                ESP_LOGW(TAG, "online PUBACK timeout (attempt %d)", attempt);
+        }
+        if (!s_online_acked)
+            ESP_LOGE(TAG, "online publish UNACKED after 3 attempts");
+        /* R26-D3：keepalive 周期后仍未确认则补发一次 */
+        vTaskDelay(pdMS_TO_TICKS(65000));
+        if (!s_online_acked) {
+            esp_mqtt_client_publish(s_client, s_topic_online, "1", 1, 1, 1);
+            ESP_LOGW(TAG, "online keepalive re-publish (R26-D3)");
+        }
+    }
+}
 static char s_client_id[24];
 static bool s_started;
 static mqtt_cfg_cb_t s_cfg_cb;
@@ -112,20 +175,29 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
     switch ((esp_mqtt_event_id_t)id) {
     case MQTT_EVENT_CONNECTED:
         s_connected = true;
-        esp_mqtt_client_publish(s_client, s_topic_online, "1", 1, 1, 1);
-        /* docs/52 P0-6: cloud-side config downlink. */
-        esp_mqtt_client_subscribe(s_client, s_topic_cfg, 1);
-        /* 74-M1:云端/机身刷屏下行通道。 */
-        esp_mqtt_client_subscribe(s_client, s_topic_display, 1);
-        esp_mqtt_client_subscribe(s_client, s_topic_ota, 1);
-        ESP_LOGI(TAG, "connected; online=1 published; cfg sub %s; "
-                 "heap free=%u min=%u", s_topic_cfg,
-                 (unsigned)esp_get_free_heap_size(),
-                 (unsigned)esp_get_minimum_free_heap_size());
+        {   /* R26-D1: 发布移交 online_pub_task（回调外） */
+            static bool task_created = false;
+            if (!task_created) {
+                task_created = true;
+                xTaskCreate(online_pub_task, "online_pub", 4096, NULL, 3,
+                            &s_online_task);
+            }
+            xTaskNotifyGive(s_online_task);
+        }
+        /* R26-B1/D1 修订（11-22 实案）：回调内连发 subscribe 存在 esp-mqtt
+         * 报文分配竞态——第三发（ota）稳定阵亡（"Subscribe message cannot
+         * be created"，昨日误判噪音实为此案）。订阅/发布/OTA boot 全部
+         * 收进 online_pub_task 串行执行。 */
         break;
     case MQTT_EVENT_DISCONNECTED:
         s_connected = false;
         ESP_LOGW(TAG, "disconnected");
+        break;
+    case MQTT_EVENT_PUBLISHED:
+        if (e->msg_id == s_online_msg_id) {
+            s_online_acked = true;
+            ESP_LOGI(TAG, "online PUBACK ok (msg_id %d)", e->msg_id);
+        }
         break;
     case MQTT_EVENT_DATA:
         if (e->topic && e->topic_len > 0 &&
@@ -138,6 +210,20 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             memcpy(buf, e->data, n);
             buf[n] = '\0';
             if (s_cfg_cb) s_cfg_cb(buf, n);
+        }
+        /* R26-B1:cmd/ota 下行——handle_cmd 只做解析+校验+起任务，回调安全 */
+        if (e->topic && e->topic_len > 0 &&
+            strncmp(e->topic, s_topic_ota, e->topic_len) == 0 &&
+            s_topic_ota[e->topic_len] == '\0') {
+            int len = e->data_len;
+            char *buf = malloc(len + 1);
+            if (buf) {
+                memcpy(buf, e->data, len);
+                buf[len] = '\0';
+                extern const char *mqtt_publisher_prefix(void);
+                ota_neck_handle_cmd(buf, len, mqtt_publisher_prefix());
+                free(buf);
+            }
         }
         /* 74-M1:cmd/display 下行(载荷与 REST /api/display 同构,可达 1KB
          * — medgrid 7 天)。堆拷贝避栈溢出。 */
@@ -250,6 +336,7 @@ void mqtt_publisher_init(void)
     snprintf(s_topic_online, sizeof(s_topic_online), "%s/neck/state/online", c->robot_prefix);
     snprintf(s_topic_cfg, sizeof(s_topic_cfg), "%s/cmd/cfg_set", c->robot_prefix);
     snprintf(s_topic_display, sizeof(s_topic_display), "%s/cmd/display", c->robot_prefix);
+    snprintf(s_topic_ota, sizeof(s_topic_ota), "%s/cmd/ota", c->robot_prefix);   /* 11-22 破案: 此行自 11-11 起缺失, s_topic_ota 恒空串 */
     snprintf(s_client_id, sizeof(s_client_id), "neck-%s",
              g_device_id[0] ? g_device_id : "esp32");
 
@@ -333,6 +420,18 @@ uint32_t mqtt_publisher_seq(void) { return s_seq; }
 uint32_t mqtt_publisher_dropped(void) { return s_dropped; }
 
 void mqtt_publisher_set_cfg_handler(mqtt_cfg_cb_t cb) { s_cfg_cb = cb; }
+
+void mqtt_publisher_suspend(void)
+{
+    /* R26-B1：OTA 下载前的第二 TLS 与 MQTT TLS 并存会超出内部 RAM
+     * （11-22 实案：双 TLS 分配失败 0x801a 两连俱亡）。下载前停
+     * MQTT——下完即重启，无需共存。 */
+    if (s_client) {
+        esp_mqtt_client_stop(s_client);
+        s_connected = false;
+        ESP_LOGW(TAG, "mqtt suspended (ota download)");
+    }
+}
 
 void mqtt_publisher_set_display_handler(mqtt_cfg_cb_t cb) { s_display_cb = cb; }
 

@@ -111,8 +111,11 @@ static void epd_task(void *arg)
 
     /* (buffers now at file scope for epd_task_plane_test) */
 
-    bw_buf = malloc(epd_buf_size());
-    red_buf = malloc(epd_buf_size());
+    /* 显式 PSRAM：4.2 平面 15000B < SPIRAM_MALLOC_ALWAYSINTERNAL(16K)
+     * 会落内部 DRAM（30KB！）挤压 TLS——5.83 时代注释的意图对 4.2 失效
+     * （11-22 实案），显式钉死。 */
+    bw_buf = heap_caps_malloc(epd_buf_size(), MALLOC_CAP_SPIRAM);
+    red_buf = heap_caps_malloc(epd_buf_size(), MALLOC_CAP_SPIRAM);
     if (!bw_buf || !red_buf) {
         ESP_LOGE(TAG, "no heap for framebuffers");
         evlog_record(EV_EPD, EPD_PHASE_NO_HEAP, 0);

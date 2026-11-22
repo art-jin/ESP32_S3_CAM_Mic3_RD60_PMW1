@@ -330,12 +330,16 @@ void epd_display_planes_5(const uint8_t *bw, const uint8_t *red, int which);
 
 void epd_display_planes_5(const uint8_t *bw, const uint8_t *red, int which)
 {
-    static uint8_t blank[EPD_BUF_MAX];
+    /* bench 专用：堆分配替代 38.9KB .bss（11-22 实案：bss 膨胀挤压内部
+     * DRAM → TLS 握手 -0x3000 两连俱亡——epd 几何合并没有罪，是这块
+     * 恒定上限静态缓冲的锅） */
+    uint8_t *blank = malloc(epd_buf_size());
+    if (!blank) return;
     if (which == 1) {
-        memset(blank, 0x00, sizeof(blank));
+        memset(blank, 0x00, epd_buf_size());
         red = blank;
     } else if (which == 2) {
-        memset(blank, 0xFF, sizeof(blank));
+        memset(blank, 0xFF, epd_buf_size());
         bw = blank;
     }
     send_cmd(0x10);
@@ -343,6 +347,7 @@ void epd_display_planes_5(const uint8_t *bw, const uint8_t *red, int which)
     send_cmd(0x13);
     send_buf(red, epd_buf_size());
     start_update_and_wait_5();
+    free(blank);
 }
 
 

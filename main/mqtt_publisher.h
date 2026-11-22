@@ -73,5 +73,6 @@ bool mqtt_publisher_publish_raw(const char *topic, const char *payload,
 
 /* Robot prefix ("family/robot") for building arbitrary topics. */
 const char *mqtt_publisher_prefix(void);
+void mqtt_publisher_suspend(void);   /* R26-B1: OTA 前停 MQTT（双 TLS 内部 RAM 限制） */
 
 #endif /* MQTT_PUBLISHER_H */

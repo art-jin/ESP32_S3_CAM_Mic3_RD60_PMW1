@@ -204,13 +204,15 @@ static void led_set(bool on) { (void)on; }
  * docs/52 P0-6: anban-neck-<robot>.local, robot taken from the MQTT
  * prefix's last segment (firmware identity, mqtt_creds.h). Falls back
  * to the old mac-suffix name if the prefix is missing. */
-#include "mqtt_creds.h"
+#include "identity.h"   /* R26-C: mDNS 名从运行时身份派生（NVS 优先）——
+                          * 编译期宏是撞名根源（11-21⑥ anan/greywolf 双占
+                          * anban-neck-anan.local 实案） */
 
 static void mdns_start(void)
 {
     mdns_init();
     const char *robot = NULL;
-    const char *p = MQTT_ROBOT_PREFIX;
+    const char *p = identity_mqtt_prefix();   /* R26-C 运行时身份 */
     const char *slash = strrchr(p, '/');
     robot = slash ? slash + 1 : p;
     if (robot[0] == '\0') {
