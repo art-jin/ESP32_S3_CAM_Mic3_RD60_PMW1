@@ -412,27 +412,14 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
      * the clear decision sees the current body geometry. */
     if (!valid || rbc < 12) {
         if (s_fall_state == RADAR_FALL_SUSPECT && valid &&
-            now - s_fall_last_us > 10000000LL) {
+            now - s_fall_last_us > 95000000LL) {   /* R25-P1: 10s→95s, 让 lying(90s) 先跑完 */
             s_fall_state = RADAR_FALL_IDLE;
             fall_reset();
             s_lying_start_us = -1;
             events_push(AEVT_FALL_CLEAR, 0, 0);
             ESP_LOGI(TAG, "FALL CLEAR (target lost)");
         }
-        /* R25-P1: absent 躺地进展 — fall_suspect 后目标持续消失
-         * 达 90s → lying_suspect（人倒地锥外不可见=雷达最强信号） */
-        if (!valid && s_fall_state == RADAR_FALL_SUSPECT) {
-            if (s_lying_start_us < 0) s_lying_start_us = now;
-            if (now - s_lying_start_us >= LYING_TOTAL_US) {
-                events_push(AEVT_LYING_SUSPECT,
-                            (int16_t)((now - s_lying_start_us) / 1000000LL), 0);
-                ESP_LOGW(TAG, "LYING SUSPECT (absent %llds)",
-                         (long long)((now - s_lying_start_us) / 1000000LL));
-                s_fall_state = RADAR_FALL_IDLE;
-                fall_reset();
-                s_lying_start_us = -1;
-            }
-        }
+        /* R25-P1: 躺地检测已挪至 radar_task 主循环（无帧时不进此处） */
         if (!valid) s_fall_last_us = now;   /* keep gap clock running */
         /* R25-P1 丢失→重建签名需要无目标时段数据：absent 也 10s 一报 */
         static int64_t s_last_absent_us = 0;
@@ -917,6 +904,32 @@ static void radar_task(void *arg)
         }
 
         int64_t now = esp_timer_get_time();
+
+        /* R25-P1: 躺地进展检查 — 独立于帧接收（雷达无目标不发帧，
+         * fall_feed 不可达；此处每循环查一次，AT6010 无目标=absent） */
+        if (s_fall_state == RADAR_FALL_SUSPECT && s_online) {
+            if (!s_target.valid || s_target.range_mm < LYING_RANGE_MM) {
+                if (s_lying_start_us < 0) {
+                    s_lying_start_us = now;
+                    ESP_LOGI(TAG, "lying timer start (absent/low)");
+                }
+                if (now - s_lying_start_us >= LYING_TOTAL_US) {
+                    int16_t absent_s =
+                        (int16_t)((now - s_lying_start_us) / 1000000LL);
+                    events_push(AEVT_LYING_SUSPECT, absent_s,
+                                (int16_t)(s_target.range_mm / 10));
+                    ESP_LOGW(TAG, "LYING SUSPECT (%s, %ds)",
+                             s_target.valid ? "low_range" : "absent",
+                             absent_s);
+                    s_fall_state = RADAR_FALL_IDLE;
+                    fall_reset();
+                    s_lying_start_us = -1;
+                }
+            } else if (s_target.valid && s_target.range_mm > 800) {
+                s_lying_start_us = -1;   /* 目标回正常高度 */
+            }
+        }
+
         if (now - last_poll >= RAD_POLL_MS * 1000LL) {
             uart_write_bytes(RAD_UART_NUM, DET_Q, sizeof(DET_Q));
             last_poll = now;

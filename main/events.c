@@ -48,6 +48,10 @@ static void mirror_to_evlog(uint8_t type, int16_t v1, int16_t v2,
                                 (uint32_t)v1 * 10, v2, conf, diag1, diag2);
         break;
     case AEVT_LYING_SUSPECT:
+        evlog_record(EV_FALL, v1, v2);
+        mqtt_publish_event_diag(MQTT_EVT_LYING_SUSPECT,
+                                (uint32_t)v1, v2, conf, diag1, diag2);
+        break;
     case AEVT_FALL_CLEAR:
         evlog_record(EV_FALL, 0, v1);
         mqtt_publish_event_diag(MQTT_EVT_FALL_CLEAR, 0, 0, 0, diag1, diag2);
