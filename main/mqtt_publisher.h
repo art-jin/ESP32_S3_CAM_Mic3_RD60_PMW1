@@ -25,6 +25,7 @@ typedef enum {
      * in radar.c; these make them leave the device). */
     MQTT_EVT_FALL_SUSPECT,
     MQTT_EVT_FALL_CLEAR,
+    MQTT_EVT_LYING_SUSPECT,
     MQTT_EVT_STILL_ALARM,
     MQTT_EVT_STILL_RECOVER,
     /* Reserved enum slot for P0-2 bed-zone suppression (no producer yet). */

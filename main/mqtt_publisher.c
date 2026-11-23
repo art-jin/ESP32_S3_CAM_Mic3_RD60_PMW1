@@ -69,6 +69,7 @@ static const char *evt_type_str(mqtt_event_type_t t)
     case MQTT_EVT_RADAR_OFFLINE:return "radar_offline";
     case MQTT_EVT_FALL_SUSPECT: return "fall_suspect";
     case MQTT_EVT_FALL_CLEAR:   return "fall_clear";
+    case MQTT_EVT_LYING_SUSPECT:return "lying_suspect";
     case MQTT_EVT_STILL_ALARM:  return "still_alarm";
     case MQTT_EVT_STILL_RECOVER:return "still_recover";
     case MQTT_EVT_IN_BED_STILL: return "in_bed_still";

@@ -20,6 +20,7 @@ typedef enum {
     AEVT_STILL_RECOVER,      /* v1=az_deg, v2=0 */
     AEVT_FALL_SUSPECT,       /* v1=range_cm, v2=az_deg (weak-feature chain) */
     AEVT_FALL_CLEAR,         /* v1=0, v2=0 (got up / false alarm) */
+    AEVT_LYING_SUSPECT,      /* R25-P1: v1=absent_s, v2=range_mm(0=absent) */
     AEVT_TYPE_COUNT
 } app_event_type_t;
 

@@ -339,6 +339,11 @@ static int64_t s_fall_lastqual_us = -1;
 static float s_fall_med0;
 static int s_fall_clear_v;
 static int64_t s_fall_last_us = -1;
+/* R25-P1: 躺地进展 — fall_suspect 后目标持续 absent 或 <500mm 达
+ * T_total(90s=T_enter 30s+T_confirm 60s) → lying_suspect（视觉确认触发） */
+#define LYING_TOTAL_US   90000000LL   /* 90s */
+#define LYING_RANGE_MM   500          /* 地面高度（1.5m 安装 ÷ 3） */
+static int64_t s_lying_start_us = -1;  /* absent/low 起始时刻 */
 
 static void fall_reset(void)
 {
@@ -363,6 +368,7 @@ static void fall_fire(int16_t range_cm, int16_t ang, uint8_t rbc,
 {
     s_fall_state = RADAR_FALL_SUSPECT;
     s_fall_clear_v = 0;
+    s_lying_start_us = -1;   /* R25-P1: 重置躺地计时 */
     int16_t az = (int16_t)(RADAR_AZ_OFFSET_DEG + RADAR_AZ_SCALE * (float)ang);
     if (mode_manager_get_fall_shadow()) {
         /* R25-P0 影子模式（3-7 天系数采集期）：判定照跑，事件不进告警链，
@@ -409,8 +415,23 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
             now - s_fall_last_us > 10000000LL) {
             s_fall_state = RADAR_FALL_IDLE;
             fall_reset();
+            s_lying_start_us = -1;
             events_push(AEVT_FALL_CLEAR, 0, 0);
             ESP_LOGI(TAG, "FALL CLEAR (target lost)");
+        }
+        /* R25-P1: absent 躺地进展 — fall_suspect 后目标持续消失
+         * 达 90s → lying_suspect（人倒地锥外不可见=雷达最强信号） */
+        if (!valid && s_fall_state == RADAR_FALL_SUSPECT) {
+            if (s_lying_start_us < 0) s_lying_start_us = now;
+            if (now - s_lying_start_us >= LYING_TOTAL_US) {
+                events_push(AEVT_LYING_SUSPECT,
+                            (int16_t)((now - s_lying_start_us) / 1000000LL), 0);
+                ESP_LOGW(TAG, "LYING SUSPECT (absent %llds)",
+                         (long long)((now - s_lying_start_us) / 1000000LL));
+                s_fall_state = RADAR_FALL_IDLE;
+                fall_reset();
+                s_lying_start_us = -1;
+            }
         }
         if (!valid) s_fall_last_us = now;   /* keep gap clock running */
         /* R25-P1 丢失→重建签名需要无目标时段数据：absent 也 10s 一报 */
@@ -433,6 +454,25 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     }
 
     if (s_fall_state == RADAR_FALL_SUSPECT) {
+        /* R25-P1: 低距离躺地 — 目标可见但在地面高度（<500mm）持续 90s */
+        if (rmm < LYING_RANGE_MM) {
+            if (s_lying_start_us < 0) s_lying_start_us = now;
+            if (now - s_lying_start_us >= LYING_TOTAL_US) {
+                events_push_diag(AEVT_LYING_SUSPECT,
+                                 (int16_t)((now - s_lying_start_us) / 1000000LL),
+                                 (int16_t)(rmm / 10), rbc,
+                                 (int16_t)s_fall_spread, -1);
+                ESP_LOGW(TAG, "LYING SUSPECT (low %dmm for %llds)",
+                         rmm,
+                         (long long)((now - s_lying_start_us) / 1000000LL));
+                s_fall_state = RADAR_FALL_IDLE;
+                fall_reset();
+                s_lying_start_us = -1;
+                return;
+            }
+        } else if (rmm > 800) {
+            s_lying_start_us = -1;   /* 目标回正常高度：重置躺地计时 */
+        }
         s_fr[s_fall_idx] = rmm;
         s_fa[s_fall_idx] = (angle_conf >= 8) ? ang : 0x7FFF;
         s_fst[s_fall_idx] = (uint8_t)st;
@@ -455,6 +495,7 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
             if (mx - mn < 350 && motion_cnt >= 4) {
                 s_fall_state = RADAR_FALL_IDLE;
                 fall_reset();
+                s_lying_start_us = -1;
                 events_push_diag(AEVT_FALL_CLEAR, 0, 0, rbc,
                                  (int16_t)(mx - mn), -1);
                 ESP_LOGI(TAG, "FALL CLEAR (upright, spread=%d)", mx - mn);
