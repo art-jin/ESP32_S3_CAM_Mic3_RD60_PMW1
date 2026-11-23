@@ -418,7 +418,7 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
         static uint8_t s_absent_cnt = 0;
         if (now - s_last_absent_us >= 1000000LL) {
             s_last_absent_us = now;
-            if (++s_absent_cnt >= 10) {
+            if (++s_absent_cnt >= 10 && mode_manager_get_fall_shadow()) {
                 s_absent_cnt = 0;
                 char sj[96], st[64];
                 snprintf(st, sizeof(st), "%s/neck/radar_shadow",
@@ -588,8 +588,10 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
                  s_fall_n, (double)med, spread, spread_threshold, runs,
                  ang_std, ang_n, rbc, qualify ? " [Q]" : "");
         /* R25-P0: 每 10s 聚合一份上 shadow topic（宿主收 3-7 天定分位数；
-         * 1Hz 全量只在串口，MQTT 载 1/10 防刷 broker） */
-        if (++s_tel_cnt >= 10) {
+         * 1Hz 全量只在串口，MQTT 载 1/10 防刷 broker）
+         * 11-23 系数定型后：仅 fall_shadow=true（标定模式）时上遥测，
+         * 正常运营零流量（~10k 行/天→0） */
+        if (++s_tel_cnt >= 10 && mode_manager_get_fall_shadow()) {
             s_tel_cnt = 0;
             char sj[224], st[64];
             snprintf(st, sizeof(st), "%s/neck/radar_shadow",
