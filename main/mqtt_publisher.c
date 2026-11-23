@@ -98,6 +98,7 @@ static char s_topic_online[64];
 static char s_topic_cfg[64];
 static char s_topic_display[64];
 static char s_topic_ota[64];
+static char s_topic_point[64];   /* 92 R27: cmd/point 下行 */
 
 /* R26-D（11-21④ 竞态根治）：online 发布移出 CONNECTED 回调——回调内
  * esp_mqtt_client_publish 的入队存在间歇性静默失败（08:06 实案：会话活、
@@ -125,6 +126,7 @@ static void online_pub_task(void *arg)
         esp_mqtt_client_subscribe(s_client, s_topic_display, 1);
         vTaskDelay(pdMS_TO_TICKS(50));
         esp_mqtt_client_subscribe(s_client, s_topic_ota, 1);
+        esp_mqtt_client_subscribe(s_client, s_topic_point, 1);   /* 92 R27 */
         vTaskDelay(pdMS_TO_TICKS(50));
 
         /* R26-B2/B3：boot 上报 + mark_valid（WiFi+MQTT 首连=生命体征） */
@@ -245,6 +247,22 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 free(buf);
             }
         }
+        /* 92 R27: cmd/point 下行——one-shot 转向（rest_api 的
+         * neck_point_mqtt 复用 dir_map/shake/限速语义）。载荷小，栈拷贝。 */
+        if (e->topic && e->topic_len > 0 &&
+            strncmp(e->topic, s_topic_point, e->topic_len) == 0 &&
+            s_topic_point[e->topic_len] == '\0') {
+            char buf[96];
+            int n = e->data_len < (int)sizeof(buf) - 1
+                        ? e->data_len : (int)sizeof(buf) - 1;
+            memcpy(buf, e->data, n);
+            buf[n] = '\0';
+            extern bool neck_point_mqtt(const char *, char *, size_t);
+            char err[24];
+            if (!neck_point_mqtt(buf, err, sizeof(err))) {
+                ESP_LOGW(TAG, "cmd/point rejected: %s", err);
+            }
+        }
         break;
     case MQTT_EVENT_ERROR:
         if (e->error_handle->error_type == MQTT_ERROR_TYPE_ESP_TLS) {
@@ -343,6 +361,7 @@ void mqtt_publisher_init(void)
     snprintf(s_topic_cfg, sizeof(s_topic_cfg), "%s/cmd/cfg_set", c->robot_prefix);
     snprintf(s_topic_display, sizeof(s_topic_display), "%s/cmd/display", c->robot_prefix);
     snprintf(s_topic_ota, sizeof(s_topic_ota), "%s/cmd/ota", c->robot_prefix);   /* 11-22 破案: 此行自 11-11 起缺失, s_topic_ota 恒空串 */
+    snprintf(s_topic_point, sizeof(s_topic_point), "%s/cmd/point", c->robot_prefix);
     snprintf(s_client_id, sizeof(s_client_id), "neck-%s",
              g_device_id[0] ? g_device_id : "esp32");
 

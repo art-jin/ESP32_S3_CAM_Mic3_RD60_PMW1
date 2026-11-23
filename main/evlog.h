@@ -41,6 +41,7 @@ enum {
     EV_OOR        = 12, /* flags=oor_policy id,   value=target_deg */
     EV_FALL       = 13, /* flags=1=suspect/0=clear, value=range_cm */
     EV_EPD        = 14, /* flags=EPD_PHASE_*, see below */
+    EV_CMD_REJECT = 15, /* flags=SRC_*, value=1=shake/2=rate/3=bad_args (92 R27) */
 };
 
 /* EV_EPD phases (flags field) — bring-up visibility without serial console. */
@@ -62,6 +63,7 @@ enum {
     SRC_SHAKE   = 3,
     SRC_IDLE    = 4,
     SRC_BOOT    = 5,
+    SRC_MQTT    = 6,   /* 92 R27: cmd/point 下行 */
 };
 
 /* Initialize: open NVS, increment boot counter, print prior events.

@@ -1104,6 +1104,76 @@ static esp_err_t handler_point(httpd_req_t *req)
     return send_json_ok(req, resp);
 }
 
+/* 92 R27 (docs/92 §5.1): MQTT cmd/point 下行入口。与 REST /api/point 的
+ * 差别=one-shot 语义（评审 D-7）：TRACK 下收到不拒绝，临时切 COMMAND
+ * （resume_sec 后 mode_manager_tick 自动回 TRACK，tracker 驱动随模式
+ * 切换自然抑制）；已处 COMMAND 则仅刷新计时。无回执通道，拒绝记
+ * EV_CMD_REJECT（shake/限速/参数错），成动记 EV_SERVO_CMD/SRC_MQTT。 */
+bool neck_point_mqtt(const char *body, char *reterr, size_t errsz)
+{
+    if (s_shaking) {
+        evlog_record(EV_CMD_REJECT, SRC_MQTT, 1);
+        snprintf(reterr, errsz, "shaking");
+        return false;
+    }
+
+    int64_t now = esp_timer_get_time();
+    if (now - s_last_point_us < POINT_MIN_INTERVAL_US) {
+        evlog_record(EV_CMD_REJECT, SRC_MQTT, 2);
+        snprintf(reterr, errsz, "rate_limited");
+        return false;
+    }
+
+    float target = 0.0f;
+    bool  have_target = false;
+    char dir_str[8] = {0};
+    if (json_get_str(body, "dir", dir_str, sizeof(dir_str))) {
+        for (int i = 0; i < (int)N_DIR; i++) {
+            if (strcmp(dir_str, s_dir_map[i].name) == 0) {
+                target = s_dir_map[i].angle;
+                have_target = true;
+                break;
+            }
+        }
+        if (!have_target) {
+            evlog_record(EV_CMD_REJECT, SRC_MQTT, 3);
+            snprintf(reterr, errsz, "bad_dir");
+            return false;
+        }
+    } else if (json_get_str(body, "angle", dir_str, sizeof(dir_str))) {
+        target = strtof(dir_str, NULL);
+        have_target = true;
+    }
+    if (!have_target) {
+        evlog_record(EV_CMD_REJECT, SRC_MQTT, 3);
+        snprintf(reterr, errsz, "no_target");
+        return false;
+    }
+
+    if (target > SERVO_ANGLE_MAX_DEG) target = SERVO_ANGLE_MAX_DEG;
+    if (target < SERVO_ANGLE_MIN_DEG) target = SERVO_ANGLE_MIN_DEG;
+
+    int resume_sec = 60;
+    int tmp = 0;
+    if (json_get_int(body, "resume_sec", &tmp)) {
+        if (tmp < 5) tmp = 5;
+        if (tmp > 3600) tmp = 3600;
+        resume_sec = tmp;
+    }
+
+    s_last_point_us = now;
+    if (mode_manager_get() == MODE_COMMAND) {
+        mode_manager_register_command();
+    } else {
+        mode_manager_set(MODE_COMMAND, resume_sec);
+    }
+    servo_set_angle_deg(target);
+    evlog_record(EV_SERVO_CMD, SRC_MQTT, (int16_t)target);
+    ESP_LOGI(TAG, "cmd/point(mqtt): target=%.1f resume=%ds", target, resume_sec);
+    if (reterr && errsz) reterr[0] = '\0';
+    return true;
+}
+
 /* POST /api/shake?device_id=XXXX
  * Shake the servo ±10° (boundary-aware) around the current position.
  * Pattern: 3 oscillations, pause 2s, 2 oscillations, return to start.

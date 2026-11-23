@@ -57,6 +57,7 @@ const char *evlog_type_str(uint8_t type)
         case EV_OOR:         return "OOR";
         case EV_FALL:        return "FALL";
         case EV_EPD:         return "EPD";
+        case EV_CMD_REJECT:  return "CMD_REJECT";
         default:             return "?";
     }
 }
@@ -162,13 +163,14 @@ uint32_t evlog_get_boot_count(void)
  * (single-threaded caller in httpd; non-reentrant but safe in this usage). */
 const char *evlog_flags_str(uint8_t type, uint8_t flags)
 {
-    if (type == EV_SERVO_CMD) {
+    if (type == EV_SERVO_CMD || type == EV_CMD_REJECT) {
         switch (flags) {
             case SRC_TRACKER: return "TRACKER";
             case SRC_REST:    return "REST";
             case SRC_SHAKE:   return "SHAKE";
             case SRC_IDLE:    return "IDLE";
             case SRC_BOOT:    return "BOOT";
+            case SRC_MQTT:    return "MQTT";
             default:          return "?";
         }
     }
