@@ -29,6 +29,7 @@
 static const char *TAG = "wifi";
 static EventGroupHandle_t s_wifi_eg;
 static esp_netif_t *s_sta_netif = NULL;
+static esp_netif_t *s_ap_netif = NULL;   /* 95-A/S1: 配对模式 AP 口 */
 static char s_ip_str[16] = {0};
 static char s_hostname[32] = {0};
 static int s_cur_slot = 0;       /* slot order = priority, boot starts at 0 */
@@ -304,7 +305,32 @@ esp_err_t wifi_init(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    /* 95-A/S1（docs/95 v1.1 D-3：softAP 配对通道）：身份空 → 配对模式。
+     * AP=anban-neck-pair-<device_id>，PSK="anban-pair-<device_id>"（SSID
+     * 派生，CAM 侧同规则——无预置密钥，F-1 零身份原则不破）。identity
+     * REST 在 AP 口立即可用（httpd 全接口），注入成功→重启→纯 STA。
+     * 半配置态（L-4）：写失败=身份仍空=下次开机自然重进本模式。 */
+    extern char g_device_id[8];
+    bool pairing = !identity_is_provisioned();
+    if (pairing) {
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+        wifi_config_t ap = { 0 };
+        char psk[24];
+        snprintf((char *)ap.ap.ssid, sizeof(ap.ap.ssid),
+                 "anban-neck-pair-%s", g_device_id);
+        ap.ap.ssid_len = strlen((char *)ap.ap.ssid);
+        snprintf(psk, sizeof(psk), "anban-pair-%s", g_device_id);
+        strlcpy((char *)ap.ap.password, psk, sizeof(ap.ap.password));
+        ap.ap.max_connection = 1;
+        ap.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
+        ESP_LOGW(TAG, "PAIRING MODE: AP \"%s\" PSK \"%s\" — identity "
+                 "REST ready on AP (192.168.4.1)",
+                 (char *)ap.ap.ssid, psk);
+    } else {
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    }
 
     /* Boot always starts at slot 0 (priority order). Its IP mode is
      * applied pre-start so the DHCP client doesn't grab a router
@@ -314,8 +340,18 @@ esp_err_t wifi_init(void)
 
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi STA init: %d slots, boot from \"%s\"",
-             WIFI_NET_COUNT, s_wifi_nets[0].ssid);
+    if (pairing) {
+        /* 配对模式：REST 不等 STA 拿 IP，AP 口立即可用（httpd 全接口）。
+         * STA 侧仍在后台尝试编译回落槽位，两不耽误。 */
+        if (!s_http_started) {
+            rest_api_start();
+            s_http_started = true;
+        }
+    }
+
+    ESP_LOGI(TAG, "WiFi STA init: %d slots, boot from \"%s\"%s",
+             WIFI_NET_COUNT, s_wifi_nets[0].ssid,
+             pairing ? " [PAIRING]" : "");
     return ESP_OK;
 }
 
