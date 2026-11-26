@@ -1191,7 +1191,9 @@ bool neck_session_mqtt(const char *body, char *reterr, size_t errsz)
         return false;
     }
     bool is_start = (strcmp(state, "start") == 0);
-    int resume_sec = 60;
+    /* resume_sec：缺省 0=永不自动回 TRACK（用户裁决 B 11-26：会话结束
+     * 保持指令态直到下次唤醒/人工）；显式给值才自动回（5-3600 钳制）。 */
+    int resume_sec = 0;
     int tmp = 0;
     if (json_get_int(body, "resume_sec", &tmp)) {
         if (tmp < 5) tmp = 5;
