@@ -9,7 +9,7 @@
 static const char *TAG = "mode";
 
 /* Default command-mode timeout: 5 minutes. 0 = never auto-return. */
-#define COMMAND_DEFAULT_TIMEOUT_S  300
+#define COMMAND_DEFAULT_TIMEOUT_S  0    /* 96-S1 裁决 C(11-27): 指令态为默认常态，永不自动回 TRACK */
 
 static _Atomic app_mode_t s_mode = MODE_TRACK;
 static int64_t s_last_command_us = 0;
@@ -84,12 +84,16 @@ static void cfg_load(void)
 
 void mode_manager_init(void)
 {
-    atomic_store(&s_mode, MODE_TRACK);
+    /* 96-S1 裁决 C（11-27 用户拍板）：开机默认=COMMAND（tracker 不启），
+     * 跟踪是对话期专属（CAM cmd/session start 切 TRACK/FUSION，end 回
+     * COMMAND）。路过不激发对话则不转向。tracker 在 main 里按模式启停。 */
+    atomic_store(&s_mode, MODE_COMMAND);
     s_last_command_us = 0;
     s_timeout_s = COMMAND_DEFAULT_TIMEOUT_S;
     cfg_load();
-    ESP_LOGI(TAG, "init: TRACK/%s oor=%s, command timeout %ds",
-             submode_name(s_submode), oor_name(s_oor_policy), s_timeout_s);
+    tracker_set_enabled(false);   /* tracker_init 默认 enabled=true，COMMAND 语义须显式关 */
+    ESP_LOGI(TAG, "init: COMMAND(default, no timeout) submode=%s oor=%s",
+             submode_name(s_submode), oor_name(s_oor_policy));
 }
 
 app_mode_t mode_manager_get(void)
