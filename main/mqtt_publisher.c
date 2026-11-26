@@ -127,8 +127,10 @@ static void online_pub_task(void *arg)
         esp_mqtt_client_subscribe(s_client, s_topic_display, 1);
         vTaskDelay(pdMS_TO_TICKS(50));
         esp_mqtt_client_subscribe(s_client, s_topic_ota, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
         esp_mqtt_client_subscribe(s_client, s_topic_point, 1);
-        esp_mqtt_client_subscribe(s_client, s_topic_session, 1);   /* 92 R27 */
+        vTaskDelay(pdMS_TO_TICKS(50));
+        esp_mqtt_client_subscribe(s_client, s_topic_session, 1);   /* 96-S1 */
         vTaskDelay(pdMS_TO_TICKS(50));
 
         /* R26-B2/B3：boot 上报 + mark_valid（WiFi+MQTT 首连=生命体征） */
