@@ -15,6 +15,7 @@
 #include "tracker.h"
 #include "wifi.h"
 #include "mode_manager.h"
+#include "radar_turn.h"
 #include "status.h"
 #include "identity.h"
 #include "epd_geom.h"
@@ -262,7 +263,8 @@ void app_main(void)
     ESP_ERROR_CHECK(servo_init());
     servo_boot_sweep();   /* visual confirmation of home + range before tracking */
     tracker_init(NULL);
-    mode_manager_init();  /* default: MODE_TRACK */
+    mode_manager_init();  /* 96 裁决 C：default COMMAND */
+    radar_turn_init();    /* 97：雷达直驱转向（NVS 参数+TZ） */
     status_init();        /* global status for REST API */
 
     /* Radar — enhancement, not a dependency: degrades to audio-only on

@@ -100,6 +100,7 @@ static char s_topic_display[64];
 static char s_topic_ota[64];
 static char s_topic_point[64];   /* 92 R27: cmd/point 下行 */
 static char s_topic_session[64]; /* 96-S1: cmd/session 下行 */
+static char s_topic_wake[64];    /* 97: cmd/wake_cfg 下行（guardian 双发） */
 
 /* R26-D（11-21④ 竞态根治）：online 发布移出 CONNECTED 回调——回调内
  * esp_mqtt_client_publish 的入队存在间歇性静默失败（08:06 实案：会话活、
@@ -132,6 +133,8 @@ static void online_pub_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(50));
         int rc_sess = esp_mqtt_client_subscribe(s_client, s_topic_session, 1);   /* 96-S1 */
         ESP_LOGI(TAG, "subscribe session '%s' rc=%d", s_topic_session, rc_sess);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        esp_mqtt_client_subscribe(s_client, s_topic_wake, 1);   /* 97 */
         vTaskDelay(pdMS_TO_TICKS(50));
 
         /* R26-B2/B3：boot 上报 + mark_valid（WiFi+MQTT 首连=生命体征） */
@@ -174,6 +177,14 @@ static void online_pub_task(void *arg)
 }
 static char s_client_id[24];
 static bool s_started;
+
+/* 97：SNTP 同步回调——夜间窗门控前提（未同步=非夜间，L-3） */
+static void on_sntp_sync(struct timeval *tv)
+{
+    (void)tv;
+    extern void radar_turn_set_time_synced(void);
+    radar_turn_set_time_synced();
+}
 static mqtt_cfg_cb_t s_cfg_cb;
 static mqtt_cfg_cb_t s_display_cb;   /* 74-M1 cmd/display,同签名 */
 
@@ -268,6 +279,20 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 ESP_LOGW(TAG, "cmd/point rejected: %s", err);
             }
         }
+        /* 97: cmd/wake_cfg 下行（guardian 双发；只取 radar_turn 5 字段） */
+        if (e->topic && e->topic_len > 0 &&
+            strncmp(e->topic, s_topic_wake, e->topic_len) == 0 &&
+            s_topic_wake[e->topic_len] == '\0') {
+            int len = e->data_len;
+            char *buf = malloc(len + 1);
+            if (buf) {
+                memcpy(buf, e->data, len);
+                buf[len] = '\0';
+                extern void radar_turn_on_wake_cfg(const char *);
+                radar_turn_on_wake_cfg(buf);
+                free(buf);
+            }
+        }
         /* 96-S1: cmd/session 下行（会话 start→强制 FUSION / end→归位） */
         if (e->topic && e->topic_len > 0 &&
             strncmp(e->topic, s_topic_session, e->topic_len) == 0 &&
@@ -352,6 +377,8 @@ static void on_ip_got(void *arg, esp_event_base_t base, int32_t id, void *data)
     /* SNTP for epoch timestamps in the event payload (unsynced ⇒ sec=0). */
     esp_sntp_config_t sntp_cfg =
         ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+    /* 97：同步回调置 time_synced（夜间窗门控前提；未同步=非夜间 L-3） */
+    sntp_cfg.sync_cb = on_sntp_sync;
     esp_netif_sntp_init(&sntp_cfg);   /* .start=true: service starts now */
 
     esp_mqtt_client_start(s_client);
@@ -383,6 +410,7 @@ void mqtt_publisher_init(void)
     snprintf(s_topic_ota, sizeof(s_topic_ota), "%s/cmd/ota", c->robot_prefix);   /* 11-22 破案: 此行自 11-11 起缺失, s_topic_ota 恒空串 */
     snprintf(s_topic_point, sizeof(s_topic_point), "%s/cmd/point", c->robot_prefix);
     snprintf(s_topic_session, sizeof(s_topic_session), "%s/cmd/session", c->robot_prefix);
+    snprintf(s_topic_wake, sizeof(s_topic_wake), "%s/cmd/wake_cfg", c->robot_prefix);
     snprintf(s_client_id, sizeof(s_client_id), "neck-%s",
              g_device_id[0] ? g_device_id : "esp32");
 

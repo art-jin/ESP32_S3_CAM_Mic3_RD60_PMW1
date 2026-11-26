@@ -48,12 +48,16 @@ void mode_manager_set(app_mode_t mode, int timeout_s);
 /* Get current effective timeout (0 = no auto-return). */
 int mode_manager_get_timeout(void);
 
-/* 96-S1：COMMAND one-shot 的来源（谁把脖子切到 COMMAND）。start 会话
- * 不抢占 SRC_MQTT（R27 巡检拍照窗）；来源随回 TRACK 自动清零。 */
+/* 96-S1/97：oneshot_src = **当前模式切换的持有方**（97a M-1 统一语义：
+ * 既表示"谁切到 COMMAND"也表示"谁切到 TRACK"——任一时刻只有一个持有者，
+ * 所有自动路径见非己方持有即不动）。start 会话不抢占 MQTT（巡检窗）；
+ * radar 归位/end 到期回 COMMAND 置回 NONE；MANUAL 只由人工入口置/清。 */
 typedef enum {
     ONESHOT_NONE = 0,
     ONESHOT_MQTT,      /* cmd/point（巡检/语音转向） */
-    ONESHOT_SESSION,   /* cmd/session end（会话结束归位） */
+    ONESHOT_SESSION,   /* cmd/session start/end（会话期） */
+    ONESHOT_RADAR,     /* 97：zone_enter 本地反射（转头看人，hold 后回正） */
+    ONESHOT_MANUAL,    /* 97a E-1：人工锁定（REST/L1 切 COMMAND），自动路径全禁 */
 } oneshot_src_t;
 oneshot_src_t mode_manager_oneshot_src(void);
 void mode_manager_set_oneshot_src(oneshot_src_t src);

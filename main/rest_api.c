@@ -154,7 +154,7 @@ static bool json_get_str(const char *body, const char *key, char *out, size_t ou
     return true;
 }
 
-static bool json_get_int(const char *body, const char *key, int *out)
+bool json_get_int(const char *body, const char *key, int *out)   /* 97: radar_turn 复用 */
 {
     char buf[16];
     if (!json_get_str(body, key, buf, sizeof(buf))) return false;
@@ -494,8 +494,12 @@ static esp_err_t handler_mode(httpd_req_t *req)
         if (strcmp(mode_str, "command") == 0) {
             int timeout = -1;  /* -1 = use default */
             json_get_int(body, "timeout", &timeout);
+            /* 97a M-2：人工入口置 MANUAL（覆盖 SESSION 残留）——所有自动
+             * 路径（radar/start/resume）见 MANUAL 即不动，直到 track 清除 */
+            mode_manager_set_oneshot_src(ONESHOT_MANUAL);
             mode_manager_set(MODE_COMMAND, timeout);
         } else if (strcmp(mode_str, "track") == 0) {
+            mode_manager_set_oneshot_src(ONESHOT_NONE);   /* 清人工锁定 */
             mode_manager_set(MODE_TRACK, 0);
         } else {
             return send_error(req, 400, "bad_request",
@@ -1207,8 +1211,9 @@ bool neck_session_mqtt(const char *body, char *reterr, size_t errsz)
             snprintf(reterr, errsz, "mqtt_oneshot_busy");
             return false;
         }
-        if (mode_manager_get() == MODE_COMMAND && src == ONESHOT_NONE) {
-            /* 人工 COMMAND：不改模式，尊重设定 */
+        if (src == ONESHOT_MANUAL) {
+            /* 人工锁定（97a M-2）：不改模式，尊重设定——判定从
+             * "COMMAND+NONE" 改为 src==MANUAL（裁决 B 后 NONE 不再代表人工） */
             evlog_record(EV_CMD_REJECT, SRC_SESSION, 5);
             snprintf(reterr, errsz, "manual_command");
             return false;
@@ -1224,8 +1229,7 @@ bool neck_session_mqtt(const char *body, char *reterr, size_t errsz)
         ESP_LOGI(TAG, "cmd/session start: TRACK/FUSION (snapshot=%d)",
                  (int)mode_manager_get_submode());
     } else {
-        bool manual = (mode_manager_get() == MODE_COMMAND &&
-                       mode_manager_oneshot_src() == ONESHOT_NONE);
+        bool manual = (mode_manager_oneshot_src() == ONESHOT_MANUAL);   /* 97a M-2 */
         if (!manual) {
             mode_manager_set_oneshot_src(ONESHOT_SESSION);
             mode_manager_set(MODE_COMMAND, resume_sec);

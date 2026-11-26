@@ -32,6 +32,7 @@
 #include "events.h"
 #include "mode_manager.h"
 #include "zone_tracker.h"
+#include "radar_turn.h"
 #include "mqtt_publisher.h"
 
 #define RAD_UART_NUM    UART_NUM_1
@@ -715,10 +716,13 @@ static void publish(uint8_t det_result, uint16_t range_mm, int16_t angle_deg,
     if (ze == ZONE_EDGE_ENTER) {
         mqtt_publish_event(MQTT_EVT_ZONE_ENTER, range_mm,
                            (int16_t)s_target.azimuth_deg, rb_conf);
+        radar_turn_on_enter();   /* 97：本地反射（MQTT 照发给 CAM） */
     } else if (ze == ZONE_EDGE_LEAVE) {
         mqtt_publish_event(MQTT_EVT_ZONE_LEAVE, 0,
                            (int16_t)s_target.azimuth_deg, 0);
+        radar_turn_on_leave();
     }
+    radar_turn_tick();
     if (was_valid != s_target.valid || was_state != s_target.state) {
         ESP_LOGI(TAG, "%s: %s range=%umm angle=%+d° filt=%+d° az=%.0f° conf=%u/%u",
                  s_target.valid ? "target" : "cleared",
