@@ -255,10 +255,18 @@ function render(s){
   setSeg("seg_fall",s.radar.fall_detect?"1":"0");
   $("v_fall").textContent=s.radar.fall_state==="idle"?"":s.radar.fall_state==="pending"?"⏳ 确认中…":"⚠ 疑似跌倒!";
   $("v_fall").style.color=s.radar.fall_state==="suspect"?"var(--err)":"var(--warn)";
+  /* 显示层平滑（11-27 用户实录"斜前方坐着不动但点在跳"）：雷达报的是
+   * 反射质心，敲键盘/呼吸/多径鬼影都会让单帧点跳。5 帧中值滤波只影响
+   * 态势图绘制与轨迹，不碰 fusion/跌倒链（它们读固件侧原始值）。
+   * 跳变 >40° 且距上一稳定点 <1.5s 的帧视为鬼影丢弃。 */
   if(rt.valid){
-    trail.push({az:rt.azimuth,rmm:rt.range_mm,t0:performance.now()});
-    while(trail.length&&performance.now()-trail[0].t0>8000)trail.shift();
-    if(mtTrack)trackFeed(rt.azimuth,rt.range_mm);
+    const med=medianFilter(rt.azimuth,rt.range_mm);
+    if(med){
+      trail.push({az:med.az,rmm:med.rmm,t0:performance.now()});
+      while(trail.length&&performance.now()-trail[0].t0>8000)trail.shift();
+      if(mtTrack)trackFeed(med.az,med.rmm);
+      s.radar.target.azimuth=med.az; s.radar.target.range_mm=med.rmm;
+    }
   }
   $("v_online").textContent=s.radar.online?"● 在线":"✕ 离线";
   $("v_online").style.color=s.radar.online?"var(--ok)":"var(--err)";
@@ -533,6 +541,21 @@ function azRad(deg){return (deg-90)*Math.PI/180;}   /* CSS/canvas 极角：0°=�
 requestAnimationFrame(draw);
 
 /* ---------- 启动 ---------- */
+/* 5 帧中值滤波 + 鬼影抑制（态势图显示层） */
+const medBuf=[]; let lastStable=null;
+function medianFilter(az,rmm){
+  const now=performance.now();
+  medBuf.push({az,rmm}); if(medBuf.length>5)medBuf.shift();
+  if(medBuf.length<3)return null;
+  const med=a=>{const b=[...a].sort((x,y)=>x-y);return b[Math.floor(b.length/2)];};
+  const mA=med(medBuf.map(p=>p.az)), mR=med(medBuf.map(p=>p.rmm));
+  if(lastStable&&now-lastStable.t<1500){
+    let d=Math.abs(mA-lastStable.az); if(d>180)d=360-d;
+    if(d>40&&Math.abs(mR-lastStable.rmm)>400)return null;   /* 鬼影 */
+  }
+  lastStable={az:mA,rmm:mR,t:now};
+  return{az:mA,rmm:mR};
+}
 setInterval(pollStatus,500);
 setInterval(pollEvents,1000);
 pollStatus();pollEvents();
