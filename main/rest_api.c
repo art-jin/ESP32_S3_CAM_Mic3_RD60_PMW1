@@ -1211,10 +1211,13 @@ bool neck_session_mqtt(const char *body, char *reterr, size_t errsz)
             snprintf(reterr, errsz, "manual_command");
             return false;
         }
+        /* 顺序要紧（11-26 实录）：先 set TRACK 再 set FUSION——反之
+         * mode_manager_set(TRACK) 的 restore_submode 会把刚设的 FUSION
+         * 立刻还原成快照（10ms 内 fusion→audio_only）。 */
         mode_manager_snapshot_submode();
         mode_manager_set_oneshot_src(ONESHOT_SESSION);
-        mode_manager_set_submode(TRACK_FUSION);
         mode_manager_set(MODE_TRACK, 0);
+        mode_manager_set_submode(TRACK_FUSION);
         evlog_record(EV_MODE_CHG, SRC_SESSION, (int16_t)TRACK_FUSION);
         ESP_LOGI(TAG, "cmd/session start: TRACK/FUSION (snapshot=%d)",
                  (int)mode_manager_get_submode());

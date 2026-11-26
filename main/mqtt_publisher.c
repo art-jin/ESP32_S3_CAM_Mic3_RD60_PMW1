@@ -130,7 +130,8 @@ static void online_pub_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(50));
         esp_mqtt_client_subscribe(s_client, s_topic_point, 1);
         vTaskDelay(pdMS_TO_TICKS(50));
-        esp_mqtt_client_subscribe(s_client, s_topic_session, 1);   /* 96-S1 */
+        int rc_sess = esp_mqtt_client_subscribe(s_client, s_topic_session, 1);   /* 96-S1 */
+        ESP_LOGI(TAG, "subscribe session '%s' rc=%d", s_topic_session, rc_sess);
         vTaskDelay(pdMS_TO_TICKS(50));
 
         /* R26-B2/B3：boot 上报 + mark_valid（WiFi+MQTT 首连=生命体征） */

@@ -104,8 +104,11 @@ void mode_manager_set(app_mode_t mode, int timeout_s)
         evlog_record(EV_MODE_CHG, (uint8_t)old, (int16_t)mode);
     }
 
-    if (mode == MODE_TRACK && atomic_load(&s_oneshot_src) == ONESHOT_SESSION) {
-        mode_manager_restore_submode();   /* 96-S1：会话结束归位到期，还原 */
+    if (mode == MODE_TRACK && atomic_load(&s_mode) == MODE_COMMAND
+        && atomic_load(&s_oneshot_src) == ONESHOT_SESSION) {
+        /* 96-S1：仅 COMMAND→TRACK（end 到期回 TRACK）时还原会话前子模式；
+         * start 路径是 TRACK→TRACK（已是 TRACK）不触发。 */
+        mode_manager_restore_submode();
         atomic_store(&s_oneshot_src, ONESHOT_NONE);
     }
     if (mode == MODE_COMMAND) {
