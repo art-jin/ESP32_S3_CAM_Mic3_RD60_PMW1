@@ -542,10 +542,10 @@ requestAnimationFrame(draw);
 
 /* ---------- 启动 ---------- */
 /* 5 帧中值滤波 + 鬼影抑制（态势图显示层） */
-const medBuf=[]; let lastStable=null;
+const medBuf=[]; let lastStable=null, ema=null;
 function medianFilter(az,rmm){
   const now=performance.now();
-  medBuf.push({az,rmm}); if(medBuf.length>5)medBuf.shift();
+  medBuf.push({az,rmm}); if(medBuf.length>9)medBuf.shift();   /* 4.5s 窗 */
   if(medBuf.length<3)return null;
   const med=a=>{const b=[...a].sort((x,y)=>x-y);return b[Math.floor(b.length/2)];};
   const mA=med(medBuf.map(p=>p.az)), mR=med(medBuf.map(p=>p.rmm));
@@ -554,7 +554,11 @@ function medianFilter(az,rmm){
     if(d>40&&Math.abs(mR-lastStable.rmm)>400)return null;   /* 鬼影 */
   }
   lastStable={az:mA,rmm:mR,t:now};
-  return{az:mA,rmm:mR};
+  /* EMA（α=0.35）：中值去极值后再平滑，方框跟真实移动仍有响应 */
+  if(!ema)ema={az:mA,rmm:mR};
+  let da=mA-ema.az; if(da>180)da-=360; if(da<-180)da+=360;
+  ema.az+=0.35*da; ema.rmm+=0.35*(mR-ema.rmm);
+  return{az:ema.az,rmm:ema.rmm};
 }
 setInterval(pollStatus,500);
 setInterval(pollEvents,1000);
