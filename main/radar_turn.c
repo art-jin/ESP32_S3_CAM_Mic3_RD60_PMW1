@@ -186,6 +186,7 @@ void radar_turn_on_wake_cfg(const char *body)
     snprintf(topic, sizeof(topic), "%s/status/wake", mqtt_publisher_prefix());
     snprintf(receipt, sizeof(receipt), "{%s}", cfgj);
     bool ok = mqtt_publisher_publish_raw(topic, receipt, 1, 0);
+    evlog_record(EV_CMD_REJECT, SRC_RADAR, ok ? 0 : 9);   /* 0=cfg applied+receipt / 9=receipt fail */
     ESP_LOGI(TAG, "wake_cfg receipt %s: %s", ok ? "sent" : "FAIL", receipt);
 }
 
