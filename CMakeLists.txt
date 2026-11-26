@@ -3,5 +3,5 @@
 cmake_minimum_required(VERSION 3.22)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-set(PROJECT_VER "2026112703")   # R26-B1: OTA 版本闸(YYYYMMDDNN,单调)
+set(PROJECT_VER "2026112704")   # R26-B1: OTA 版本闸(YYYYMMDDNN,单调)
 project(ESP32_S3_CAM_Mic3_RD60_PMW1 VERSION 2026112305)

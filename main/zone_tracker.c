@@ -79,7 +79,10 @@ zone_edge_t zone_sm_feed(bool valid, uint32_t range_mm, uint8_t rb_conf,
                 return ZONE_EDGE_ENTER;
             }
         } else {
-            s_in_cnt = 0;
+            /* 11-27 实录：斜前方走近时多径鬼影让 range 在 0.5↔3.6m 跳，
+             * 原来一帧不满足即清零→ENTER 永远凑不齐 3 帧（presence 唤醒
+             * 失效）。改为衰减：单帧鬼影不清零，连续 2 帧不可信才清。 */
+            if (s_in_cnt > 0) s_in_cnt--;
         }
     } else {
         if (trusted && range_mm > (uint32_t)s_cfg.enter_mm + s_cfg.hyst_mm) {
