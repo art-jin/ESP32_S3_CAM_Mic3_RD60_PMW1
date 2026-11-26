@@ -1167,9 +1167,69 @@ bool neck_point_mqtt(const char *body, char *reterr, size_t errsz)
     } else {
         mode_manager_set(MODE_COMMAND, resume_sec);
     }
+    mode_manager_set_oneshot_src(ONESHOT_MQTT);   /* 96-S1：巡检/语音转向 */
     servo_set_angle_deg(target);
     evlog_record(EV_SERVO_CMD, SRC_MQTT, (int16_t)target);
     ESP_LOGI(TAG, "cmd/point(mqtt): target=%.1f resume=%ds", target, resume_sec);
+    if (reterr && errsz) reterr[0] = '\0';
+    return true;
+}
+
+/* 96-S1 cmd/session：CAM 会话生命周期。
+ *   {"state":"start"} → 强制 TRACK/FUSION（3D Mic 接触不良，纯声跟踪不稳，
+ *                      雷达+声源融合兜底）；快照会话前子模式供结束还原；
+ *                      **不抢占 ONESHOT_MQTT**（巡检拍照窗内被唤醒→等归位）
+ *   {"state":"end"}   → 归 0°（6 点）+COMMAND（resume_sec，默认 60）→到期
+ *                      自动回 TRACK 并还原子模式
+ * 人工 COMMAND（REST /api/mode 或 L1 neck_set_mode，来源=NONE）时 start/end
+ * 均不改模式（尊重人工设定），end 仅归位不动模式。 */
+bool neck_session_mqtt(const char *body, char *reterr, size_t errsz)
+{
+    char state[8] = {0};
+    if (!json_get_str(body, "state", state, sizeof(state))) {
+        snprintf(reterr, errsz, "no_state");
+        return false;
+    }
+    bool is_start = (strcmp(state, "start") == 0);
+    int resume_sec = 60;
+    int tmp = 0;
+    if (json_get_int(body, "resume_sec", &tmp)) {
+        if (tmp < 5) tmp = 5;
+        if (tmp > 3600) tmp = 3600;
+        resume_sec = tmp;
+    }
+    if (is_start) {
+        oneshot_src_t src = mode_manager_oneshot_src();
+        if (src == ONESHOT_MQTT) {
+            evlog_record(EV_CMD_REJECT, SRC_SESSION, 4);   /* 巡检窗内让路 */
+            snprintf(reterr, errsz, "mqtt_oneshot_busy");
+            return false;
+        }
+        if (mode_manager_get() == MODE_COMMAND && src == ONESHOT_NONE) {
+            /* 人工 COMMAND：不改模式，尊重设定 */
+            evlog_record(EV_CMD_REJECT, SRC_SESSION, 5);
+            snprintf(reterr, errsz, "manual_command");
+            return false;
+        }
+        mode_manager_snapshot_submode();
+        mode_manager_set_oneshot_src(ONESHOT_SESSION);
+        mode_manager_set_submode(TRACK_FUSION);
+        mode_manager_set(MODE_TRACK, 0);
+        evlog_record(EV_MODE_CHG, SRC_SESSION, (int16_t)TRACK_FUSION);
+        ESP_LOGI(TAG, "cmd/session start: TRACK/FUSION (snapshot=%d)",
+                 (int)mode_manager_get_submode());
+    } else {
+        bool manual = (mode_manager_get() == MODE_COMMAND &&
+                       mode_manager_oneshot_src() == ONESHOT_NONE);
+        if (!manual) {
+            mode_manager_set_oneshot_src(ONESHOT_SESSION);
+            mode_manager_set(MODE_COMMAND, resume_sec);
+        }
+        servo_set_angle_deg(0.0f);
+        evlog_record(EV_SERVO_CMD, SRC_SESSION, 0);
+        ESP_LOGI(TAG, "cmd/session end: home%s (resume=%ds)",
+                 manual ? " (manual COMMAND: mode kept)" : "", resume_sec);
+    }
     if (reterr && errsz) reterr[0] = '\0';
     return true;
 }

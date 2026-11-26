@@ -16,6 +16,10 @@ static int64_t s_last_command_us = 0;
 static int     s_timeout_s = COMMAND_DEFAULT_TIMEOUT_S;
 
 static track_submode_t s_submode = TRACK_AUDIO_ONLY;
+/* 96-S1：COMMAND one-shot 来源 + 会话前子模式快照（须在 mode_manager_set 之前） */
+static _Atomic oneshot_src_t s_oneshot_src = ONESHOT_NONE;
+static track_submode_t s_submode_snapshot = TRACK_FUSION;
+static bool s_has_snapshot = false;
 static oor_policy_t    s_oor_policy = OOR_HOLD;
 static uint16_t        s_still_min = 0;   /* 0 = still-alarm disabled */
 static bool            s_assoc_gate = false;
@@ -100,6 +104,10 @@ void mode_manager_set(app_mode_t mode, int timeout_s)
         evlog_record(EV_MODE_CHG, (uint8_t)old, (int16_t)mode);
     }
 
+    if (mode == MODE_TRACK && atomic_load(&s_oneshot_src) == ONESHOT_SESSION) {
+        mode_manager_restore_submode();   /* 96-S1：会话结束归位到期，还原 */
+        atomic_store(&s_oneshot_src, ONESHOT_NONE);
+    }
     if (mode == MODE_COMMAND) {
         tracker_set_enabled(false);
         s_timeout_s = (timeout_s >= 0) ? timeout_s : COMMAND_DEFAULT_TIMEOUT_S;
@@ -127,6 +135,7 @@ void mode_manager_tick(void)
     int64_t elapsed_s = (now - s_last_command_us) / 1000000;
     if (elapsed_s > s_timeout_s) {
         ESP_LOGI(TAG, "command timeout (%ds), returning to TRACK", s_timeout_s);
+        mode_manager_set_oneshot_src(ONESHOT_NONE);
         mode_manager_set(MODE_TRACK, 0);
     }
 }
@@ -134,6 +143,31 @@ void mode_manager_tick(void)
 void mode_manager_register_command(void)
 {
     s_last_command_us = esp_timer_get_time();
+}
+
+/* ---- 96-S1：one-shot 来源 + 会话前子模式快照 ---- */
+oneshot_src_t mode_manager_oneshot_src(void)
+{
+    return atomic_load(&s_oneshot_src);
+}
+
+void mode_manager_set_oneshot_src(oneshot_src_t src)
+{
+    atomic_store(&s_oneshot_src, src);
+}
+
+void mode_manager_snapshot_submode(void)
+{
+    s_submode_snapshot = s_submode;
+    s_has_snapshot = true;
+}
+
+void mode_manager_restore_submode(void)
+{
+    if (s_has_snapshot) {
+        mode_manager_set_submode(s_submode_snapshot);
+        s_has_snapshot = false;
+    }
 }
 
 void mode_manager_set_submode(track_submode_t submode)

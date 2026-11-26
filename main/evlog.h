@@ -64,6 +64,7 @@ enum {
     SRC_IDLE    = 4,
     SRC_BOOT    = 5,
     SRC_MQTT    = 6,   /* 92 R27: cmd/point 下行 */
+    SRC_SESSION = 7,   /* 96-S1 cmd/session（会话结束归位） */
 };
 
 /* Initialize: open NVS, increment boot counter, print prior events.

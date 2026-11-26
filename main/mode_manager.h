@@ -48,6 +48,19 @@ void mode_manager_set(app_mode_t mode, int timeout_s);
 /* Get current effective timeout (0 = no auto-return). */
 int mode_manager_get_timeout(void);
 
+/* 96-S1：COMMAND one-shot 的来源（谁把脖子切到 COMMAND）。start 会话
+ * 不抢占 SRC_MQTT（R27 巡检拍照窗）；来源随回 TRACK 自动清零。 */
+typedef enum {
+    ONESHOT_NONE = 0,
+    ONESHOT_MQTT,      /* cmd/point（巡检/语音转向） */
+    ONESHOT_SESSION,   /* cmd/session end（会话结束归位） */
+} oneshot_src_t;
+oneshot_src_t mode_manager_oneshot_src(void);
+void mode_manager_set_oneshot_src(oneshot_src_t src);
+/* 96-S1：会话期强制 FUSION，会话前子模式快照供结束还原。 */
+void mode_manager_snapshot_submode(void);
+void mode_manager_restore_submode(void);
+
 /* Track sub-mode (only meaningful in MODE_TRACK). Resets tracker state
  * on change for a clean transition. Persisted in NVS. */
 void mode_manager_set_submode(track_submode_t submode);

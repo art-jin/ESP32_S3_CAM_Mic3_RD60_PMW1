@@ -171,6 +171,7 @@ const char *evlog_flags_str(uint8_t type, uint8_t flags)
             case SRC_IDLE:    return "IDLE";
             case SRC_BOOT:    return "BOOT";
             case SRC_MQTT:    return "MQTT";
+            case SRC_SESSION: return "SESSION";
             default:          return "?";
         }
     }
