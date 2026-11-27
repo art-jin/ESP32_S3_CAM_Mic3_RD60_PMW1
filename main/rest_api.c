@@ -352,6 +352,11 @@ extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 static esp_err_t handler_root(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    /* 11-27：内嵌页无版本号，Safari 激进缓存旧版（狂徒平滑代码不出现
+     * 实录）——禁缓存，每次拉最新（页面 ~30KB，局域网无压力）。 */
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, must-revalidate");
+    httpd_resp_set_hdr(req, "Pragma", "no-cache");
+    httpd_resp_set_hdr(req, "Expires", "0");
     return httpd_resp_send(req, (const char *)index_html_start,
                            index_html_end - index_html_start);
 }
