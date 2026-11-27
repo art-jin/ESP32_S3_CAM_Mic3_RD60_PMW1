@@ -153,7 +153,14 @@ esp_err_t identity_set_epd_panel(int panel)
 
 bool identity_is_provisioned(void)
 {
-    return s_user[0] && s_pass[0] && s_prefix[0] && s_broker[0] && s_expect[0];
+    /* 11-27 回归根修：原判裸字段 s_expect[0]——anan 脖子 NVS 没写
+     * expect_device_id（getter 有编译期回落但这里不认）→ OTA 热重启被判
+     * "未配置"→进 95-A PAIRING softAP 双模→信道/DHCP/TLS 全抖（HTTP 8s/
+     * MQTT 不回连/ota begin 失败三连实录）。改用生效值（含回落）判。 */
+    ensure_loaded();
+    return identity_mqtt_user()[0] && identity_mqtt_pass()[0] &&
+           identity_mqtt_prefix()[0] && identity_mqtt_broker()[0] &&
+           identity_expect_device_id()[0];
 }
 
 esp_err_t identity_write_all(const char *broker, const char *user,

@@ -157,6 +157,14 @@ void ota_neck_handle_cmd(const char *payload, int len, const char *prefix) {
         ota_publish(prefix, "{\"state\":\"failed\",\"error\":\"bad_json\"}");
         return;
     }
+    /* 11-27：cmd/ota 双板同 topic，target 分拣——"cam" → 脖子忽略；
+     * "neck"/缺省 → 处理（兼容旧脚本） */
+    const cJSON *tgt_item = cJSON_GetObjectItem(root, "target");
+    if (cJSON_IsString(tgt_item) && strcmp(tgt_item->valuestring, "cam") == 0) {
+        ESP_LOGI(TAG, "cmd/ota target=cam → neck ignore");
+        cJSON_Delete(root);
+        return;
+    }
     const cJSON *url_item = cJSON_GetObjectItem(root, "url");
     const cJSON *ver_item = cJSON_GetObjectItem(root, "version");
     const cJSON *force_item = cJSON_GetObjectItem(root, "force");
