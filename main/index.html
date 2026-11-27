@@ -23,7 +23,7 @@ input[type=number]{width:70px}
 main{flex:1;display:grid;grid-template-columns:1fr 360px;gap:12px;padding:12px;min-height:0}
 @media(max-width:860px){main{grid-template-columns:1fr;overflow:auto}}
 .left{display:flex;flex-direction:column;gap:8px;min-width:0}
-#ppi{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:100%;aspect-ratio:1/1;max-height:calc(100vh - 160px)}
+#ppi{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:min(100%,calc(100vh - 160px));aspect-ratio:1/1;margin:0 auto;display:block}
 #evlog{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 10px;height:110px;overflow-y:auto;font:12px/1.7 ui-monospace,monospace;color:var(--tx2);flex:none}
 #evlog b{color:var(--tx)}
 .right{display:flex;flex-direction:column;gap:12px;min-width:0;overflow-y:auto}
