@@ -24,6 +24,9 @@ static oor_policy_t    s_oor_policy = OOR_HOLD;
 static uint16_t        s_still_min = 0;   /* 0 = still-alarm disabled */
 static bool            s_assoc_gate = false;
 static bool            s_fall_detect = true;
+/* 98：安装高度（厘米，0=未配置→几何先验不启用=行为现状）。
+ * KinCal 滑块经 guardian cmd/cfg_set 下发；NVS "mmode"/"mhcm" u16。 */
+static uint16_t         s_mount_height_cm = 0;
 static bool            s_fall_shadow = false;   /* R25-P0 影子模式：默认关=生产行为 */
 
 static const char *submode_name(track_submode_t s)
@@ -79,6 +82,9 @@ static void cfg_load(void)
         s_fall_shadow = f != 0;
     if (nvs_get_u8(h, "falldet", &f) == ESP_OK && f <= 1)
         s_fall_detect = f != 0;
+    uint16_t mh;
+    if (nvs_get_u16(h, "mhcm", &mh) == ESP_OK && (mh == 0 || (mh >= 50 && mh <= 220)))
+        s_mount_height_cm = mh;
     nvs_close(h);
 }
 
@@ -252,6 +258,27 @@ void mode_manager_set_fall_detect(bool on)
 bool mode_manager_get_fall_detect(void)
 {
     return s_fall_detect;
+}
+
+/* 98：安装高度（厘米）。0=未配置。范围 50-220（0.5-2.2m，98 E-5）。 */
+void mode_manager_set_mount_height_cm(uint16_t cm)
+{
+    if (cm != 0 && (cm < 50 || cm > 220)) return;
+    if (cm == s_mount_height_cm) return;
+    s_mount_height_cm = cm;
+    nvs_handle_t h;
+    if (nvs_open("mmode", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u16(h, "mhcm", cm);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG, "mount_height: %u cm (%s)", cm,
+             cm ? "fall geometry priors ON" : "OFF (legacy behavior)");
+}
+
+uint16_t mode_manager_get_mount_height_cm(void)
+{
+    return s_mount_height_cm;
 }
 
 void mode_manager_set_fall_shadow(bool on)

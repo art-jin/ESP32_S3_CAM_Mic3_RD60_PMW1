@@ -92,6 +92,9 @@ bool mode_manager_get_assoc_gate(void);
  * 2026-09-07): emits FALL_SUSPECT / FALL_CLEAR events. Default ON.
  * Persisted in NVS. */
 void mode_manager_set_fall_detect(bool on);
+/* 98：安装高度厘米（0=未配置；50-220）。0 → 跌倒几何先验不启用。 */
+void mode_manager_set_mount_height_cm(uint16_t cm);
+uint16_t mode_manager_get_mount_height_cm(void);
 bool mode_manager_get_fall_detect(void);
 
 /* R25-P0 影子模式：跌倒判定照跑、事件不外发（3-7 天系数采集期），

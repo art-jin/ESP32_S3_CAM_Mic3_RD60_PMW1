@@ -286,6 +286,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         "\"oor\":\"%s\","
         "\"still_min\":%u,"
         "\"assoc_gate\":%s,"
+        "\"mount_height_cm\":%u,"
         "\"servo\":%.1f,"
         "\"moving\":%s,"
         "\"azimuth\":%.0f,"
@@ -309,6 +310,7 @@ static esp_err_t handler_status(httpd_req_t *req)
         oornames[mode_manager_get_oor_policy()],
         (unsigned)mode_manager_get_still_min(),
         mode_manager_get_assoc_gate() ? "true" : "false",
+        (unsigned)mode_manager_get_mount_height_cm(),
         st.servo_angle,
         st.servo_moving ? "true" : "false",
         st.azimuth,

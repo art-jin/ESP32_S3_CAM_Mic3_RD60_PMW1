@@ -442,8 +442,20 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     }
 
     if (s_fall_state == RADAR_FALL_SUSPECT) {
-        /* R25-P1: 低距离躺地 — 目标可见但在地面高度（<500mm）持续 90s */
-        if (rmm < LYING_RANGE_MM) {
+        /* R25-P1: 低距离躺地 — 目标可见但在地面高度持续 90s。
+         * 98 E-6：门槛随安装高度——h 已配置用近距门控 min(h×0.9,h−150mm)
+         * （与 qualify 入口同一判断，mm），否则维持 500 硬编码。 */
+        int lying_gate_mm = LYING_RANGE_MM;
+        {
+            const uint16_t mh = mode_manager_get_mount_height_cm();
+            if (mh) {
+                int g = (int)mh * 9 / 10;
+                int ga = (int)mh - 150;
+                if (ga < g) g = ga;
+                lying_gate_mm = g;
+            }
+        }
+        if (rmm < lying_gate_mm) {
             if (s_lying_start_us < 0) s_lying_start_us = now;
             if (now - s_lying_start_us >= LYING_TOTAL_US) {
                 events_push_diag(AEVT_LYING_SUSPECT,
@@ -548,6 +560,16 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
         spread_threshold = (int)(med * FALL_ADAPT_COEF) / 100;
         if (spread_threshold < FALL_SPREAD_MM) spread_threshold = FALL_SPREAD_MM;
     }
+    /* 98 ② 高度归一（docs/98 v1.1，k=0.65 起步）：躺地身体径向斜距跨度
+     * span=√(h²+1.7²)−h；阈值=k×span，与 R25 自适应取大。h 未配置(0)跳过。
+     * h≥1.7 时 k×span<500 → max 自动维持 500（"只紧不松"边界）。 */
+    const uint16_t mh_cm = mode_manager_get_mount_height_cm();
+    if (mh_cm) {
+        const float h_m = mh_cm / 100.0f;
+        const float span_mm = (sqrtf(h_m * h_m + 1.7f * 1.7f) - h_m) * 1000.0f;
+        int ht = (int)(span_mm * 0.65f);
+        if (ht > spread_threshold) spread_threshold = ht;
+    }
 
     /* R25-P0: 角度方差（90a 修正版）— 协议 angle_val 单位=1°；跳过 P1-2
      * 哨兵值（angle_conf<8 的不可信样本）；作为 crossings 的 OR 替代 */
@@ -569,7 +591,19 @@ static void fall_feed(bool valid, radar_tgt_state_t st,
     int16_t ang_std = ang_n ?
         (int16_t)__builtin_sqrtf(ang_var / ang_n) : 0;
 
-    bool qualify = spread >= spread_threshold && any_motion &&
+    /* 98 ① 近距不可能躺地门控（docs/98 v1.1 E-1：min(h×0.9, h−150mm)）：
+     * 躺地最近反射点（脚）斜距 ≥ h；ring 中值低于门控=目标在雷达脚下
+     * （站/坐贴近），物理上不可能躺地 → 不进 qualify。只拦入口，已
+     * latched 的 SUSPECT 走上面的 clear 路径不受影响。h 未配置跳过。 */
+    bool near_field = false;
+    if (mh_cm) {
+        int gate = (int)(mh_cm * 9 / 10);
+        int gate_abs = (int)mh_cm - 15;
+        if (gate_abs < gate) gate = gate_abs;
+        if ((int)(med / 10.0f) < gate) near_field = true;
+    }
+
+    bool qualify = !near_field && spread >= spread_threshold && any_motion &&
                    (runs >= FALL_CROSS_MIN ||
                     (ang_n && ang_std >= FALL_ANG_STD_MIN));
     if (qualify && s_fall_qual_us < 0) {

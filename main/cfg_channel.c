@@ -90,6 +90,12 @@ static void cfg_handler(const char *payload, int len)
         alen += snprintf(applied + alen, sizeof(applied) - alen,
                          "%s\"fall_detect\"", alen ? "," : "");
     }
+    /* 98：安装高度（厘米整数；guardian 把滑块米值×100 下发） */
+    if (jget_int(payload, "mount_height_cm", &tmp)) {
+        mode_manager_set_mount_height_cm((uint16_t)tmp);
+        alen += snprintf(applied + alen, sizeof(applied) - alen,
+                         "%s\"mount_height_cm\"", alen ? "," : "");
+    }
     if (jget_int(payload, "fall_shadow", &tmp)) {
         mode_manager_set_fall_shadow(tmp != 0);
         alen += snprintf(applied + alen, sizeof(applied) - alen,
